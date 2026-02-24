@@ -851,7 +851,7 @@ class CameraSource:
                     if not byte2: break
                 if not byte2: continue
                 
-                jpeg_data = b'\xff\xd8'
+                jpeg_data = bytearray(b'\xff\xd8')
                 byte1 = self.process.stdout.read(1)
                 byte2 = self.process.stdout.read(1)
                 jpeg_data += byte1 + byte2
@@ -864,7 +864,7 @@ class CameraSource:
                     
                 if byte2:
                     with self.lock:
-                        self.latest_jpeg = jpeg_data
+                        self.latest_jpeg = bytes(jpeg_data)
                     with self.state.lock:
                         self.state.camera_ok = True
                 else:
