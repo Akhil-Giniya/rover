@@ -64,253 +64,376 @@ DASHBOARD_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Rover Dashboard (UART Relay)</title>
+  <title>Rover Command Center</title>
   <style>
-    body { font-family: 'Segoe UI', Arial, sans-serif; background:#10131a; color:#e8ecf3; margin:0; }
-    .wrap { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:16px; height: 95vh; box-sizing: border-box; }
-    .card { background:#1a2030; border:1px solid #2a344d; border-radius:10px; padding:12px; margin-bottom:16px; overflow: hidden; display: flex; flex-direction: column; }
-    h1 { margin:0 0 12px 0; font-size:20px; color: #fff; }
-    h2 { margin:0 0 10px 0; font-size:16px; color: #8a9bbd; border-bottom: 1px solid #2a344d; padding-bottom: 5px; }
-    .mono { font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
-    .ok { color:#7CFC9A; }
-    .bad { color:#ff7d7d; }
-    .warn { color:#FFB74D; }
-    img { width:100%; border-radius:8px; border:1px solid #2a344d; background:#000; flex-grow: 1; object-fit: contain; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
 
-    /* GPIO Controls */
-    .control-row { display: flex; align-items: center; margin-bottom: 10px; }
-    .control-label { width: 80px; font-weight: bold; }
-    input[type=range] { flex-grow: 1; margin: 0 10px; }
-    button {
-      background: #2a344d; color: white; border: 1px solid #4a5a7d;
-      padding: 8px 16px; border-radius: 4px; cursor: pointer;
-      font-weight: bold; transition: background 0.2s;
+    :root {
+      --bg-dark: #09090b;
+      --card-bg: rgba(23, 23, 28, 0.7);
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.4);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --border: rgba(255, 255, 255, 0.1);
     }
-    button:active { background: #4a5a7d; transform: translateY(1px); }
-    button.active { background: #7CFC9A; color: #1a2030; }
 
-    .switch { position: relative; display: inline-block; width: 50px; height: 24px; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: radial-gradient(circle at top right, #1e1b4b, #09090b);
+      color: var(--text-main);
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .wrap {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 20px;
+      padding: 20px;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+    }
+
+    h1 { margin: 0 0 16px 0; font-size: 18px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-main); }
+    h2 {
+      margin: 0 0 16px 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Live Feed */
+    .feed-container {
+      position: relative;
+      flex-grow: 1;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #000;
+    }
+    img.feed { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+    .status-badge {
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(255,255,255,0.1);
+    }
+    .status-badge.live { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+    .status-badge.lost { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+
+    /* Controls */
+    .control-group { margin-bottom: 24px; }
+    .control-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .slider-container { display: flex; align-items: center; gap: 12px; }
+
+    input[type=range] {
+      -webkit-appearance: none; width: 100%; background: transparent; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-runnable-track {
+      width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      height: 18px; width: 18px; border-radius: 50%; background: var(--accent);
+      margin-top: -6px; -webkit-appearance: none; box-shadow: 0 0 10px var(--accent-glow);
+      transition: transform 0.1s;
+    }
+    input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+    /* Buttons & Toggles */
+    .btn-momentary {
+      width: 100%;
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: white;
+      border: none;
+      padding: 12px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+      transition: all 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .btn-momentary:active { transform: scale(0.98); opacity: 0.9; }
+
+    .switch-row { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
+    .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider {
+    .slider-toggle {
       position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #4a5a7d; transition: .4s; border-radius: 24px;
+      background-color: rgba(255,255,255,0.1); transition: .4s; border-radius: 24px;
     }
-    .slider:before {
-      position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px;
+    .slider-toggle:before {
+      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
       background-color: white; transition: .4s; border-radius: 50%;
     }
-    input:checked + .slider { background-color: #2196F3; }
-    input:checked + .slider:before { transform: translateX(26px); }
+    input:checked + .slider-toggle { background-color: var(--accent); }
+    input:checked + .slider-toggle:before { transform: translateX(20px); }
 
-    .gpio-section { margin-top: 20px; border-top: 1px solid #2a344d; padding-top: 10px; }
-    .gpio-title { font-size: 14px; color: #8a9bbd; margin-bottom: 10px; }
-
-    /* Telemetry Log Console */
-    .log-container { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
-    .log-controls { display: flex; gap: 10px; margin-bottom: 8px; font-size: 12px; flex-wrap: wrap; }
-    .log-filter { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
-    .log-filter input { margin: 0; }
-    #logs {
-        background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-        padding: 8px; overflow-y: scroll; flex-grow: 1; font-size: 12px; line-height: 1.4;
+    /* Logs Console */
+    .console {
+      background: rgba(0,0,0,0.5);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 10px;
+      flex-grow: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
     }
-    .log-entry { display: flex; gap: 8px; border-bottom: 1px solid #21262d; padding: 2px 0; }
-    .log-ts { color: #8b949e; min-width: 65px; }
-    .log-src { font-weight: bold; min-width: 50px; }
-    .log-msg { color: #c9d1d9; flex-grow: 1; }
+    .log-entry { display: flex; gap: 8px; opacity: 0.9; }
+    .ts { color: #52525b; min-width: 60px; }
+    .tag { font-weight: bold; border-radius: 4px; padding: 0 4px; min-width: 35px; text-align: center; }
 
-    /* Log Colors */
-    .src-ESP32 { color: #79c0ff; }
-    .src-PI { color: #d2a8ff; }
-    .src-RC { color: #7ee787; }
-    .src-GPIO { color: #ffa657; }
-    .src-SYS { color: #ff7b72; }
+    .tag-ESP32 { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+    .tag-PI { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
+    .tag-RC { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .tag-SYS { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .tag-GPIO { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
 
-    .msg-warn { color: #e3b341; }
-    .msg-error { color: #ff7b72; font-weight: bold; }
-    .msg-info { color: #a5d6ff; }
+    /* Telemetry Grid */
+    .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .stat-box {
+      background: rgba(255,255,255,0.03);
+      border-radius: 8px;
+      padding: 10px;
+      text-align: center;
+    }
+    .stat-val { font-size: 18px; font-weight: 700; color: var(--text-main); }
+    .stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; margin-top: 4px; }
 
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: #1a2030; }
-    ::-webkit-scrollbar-thumb { background: #4a5a7d; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: #5a6a8d; }
+    /* Responsive */
+    @media (max-width: 900px) {
+      .wrap { grid-template-columns: 1fr; height: auto; overflow: auto; }
+      .feed-container { height: 300px; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <!-- Left Column: Camera + GPIO -->
-    <div style="display:flex; flex-direction:column; gap:16px;">
-      <div class="card" style="flex-grow:1;">
-        <h1>Underwater Rover Dashboard</h1>
-        <h2>Live Camera</h2>
-        <img src="/video_feed" alt="camera" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdib3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iIzEwMTMxYSIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZmlsbD0iIzRhNWE3ZCIgZm9udC1zaXplPSIxMCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Q2FtZXJhIE9mZmxpbmU8L3RleHQ+PC9zdmc+'" />
+    <!-- Left Panel: Camera & Quick Actions -->
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h1>ROVER COMMAND</h1>
+        <span id="link-badge" class="status-badge lost">DISCONNECTED</span>
       </div>
 
-      <div class="card">
-        <h2>GPIO Controls</h2>
+      <div class="feed-container">
+        <img class="feed" src="/video_feed" alt="Live Feed" onerror="this.style.display='none'">
+        <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:var(--text-muted); font-size:12px; z-index:-1;">NO SIGNAL</div>
+      </div>
 
-        <div class="control-row">
-          <div class="control-label">Servo 1</div>
-          <input type="range" min="0" max="180" value="90" oninput="updateServo(1, this.value)">
-          <span id="val-s1">90°</span>
+      <div style="display:flex; gap:12px; margin-top:16px;">
+        <div class="stat-box" style="flex:1">
+            <div id="stat-rc" class="stat-val">--</div>
+            <div class="stat-label">Last Packet</div>
         </div>
-
-        <div class="control-row">
-          <div class="control-label">Servo 2</div>
-          <input type="range" min="0" max="180" value="90" oninput="updateServo(2, this.value)">
-          <span id="val-s2">90°</span>
-        </div>
-
-        <div class="gpio-section">
-            <div class="gpio-title">Relay Control (GPIO 26)</div>
-            <div class="control-row" style="justify-content: space-around;">
-              <button onmousedown="momentary(true)" onmouseup="momentary(false)" onmouseleave="momentary(false)">
-                HOLD: HIGH
-              </button>
-
-              <div style="display:flex; align-items:center;">
-                <span style="margin-right:10px;">Blink Mode:</span>
-                <label class="switch">
-                  <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
-                  <span class="slider"></span>
-                </label>
-              </div>
-            </div>
+        <div class="stat-box" style="flex:1">
+            <div id="stat-pps" class="stat-val">0</div>
+            <div class="stat-label">Packets/Sec</div>
         </div>
       </div>
     </div>
 
-    <!-- Right Column: Status + Logs -->
-    <div style="display:flex; flex-direction:column; gap:16px; height:100%;">
-      <div class="card">
-        <h2>System Status</h2>
-        <div id="status" class="mono" style="font-size:12px;">loading...</div>
-      </div>
-      <div class="card" style="flex-grow:1;">
-        <h2>Telemetry & Debug Logs</h2>
-        <div class="log-container">
-            <div class="log-controls">
-                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('ESP32')" id="f-ESP32"> ESP32</label>
-                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('PI')" id="f-PI"> PI</label>
-                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('RC')" id="f-RC"> RC</label>
-                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('SYS')" id="f-SYS"> SYS</label>
-                <button onclick="clearLogs()" style="padding:2px 8px; font-size:10px; margin-left:auto;">Clear</button>
-                <button onclick="toggleScroll()" id="btn-scroll" style="padding:2px 8px; font-size:10px;" class="active">Auto-Scroll</button>
+    <!-- Right Panel: Controls & Logs -->
+    <div style="display:flex; flex-direction:column; gap:16px;">
+
+      <!-- Controls Card -->
+      <div class="card" style="flex: 0 0 auto;">
+        <h2>Hardware Control</h2>
+
+        <!-- Servos -->
+        <div class="control-group">
+          <div class="control-label"><span>Camera Pan (Servo 1)</span> <span id="val-s1" style="color:var(--accent)">90°</span></div>
+          <div class="slider-container">
+            <input type="range" min="0" max="180" value="90" oninput="updateServo(1, this.value)">
+          </div>
+        </div>
+
+        <div class="control-group">
+          <div class="control-label"><span>Camera Tilt (Servo 2)</span> <span id="val-s2" style="color:var(--accent)">90°</span></div>
+          <div class="slider-container">
+            <input type="range" min="0" max="180" value="90" oninput="updateServo(2, this.value)">
+          </div>
+        </div>
+
+        <!-- Relay -->
+        <div style="background:rgba(255,255,255,0.03); padding:12px; border-radius:8px;">
+            <div class="control-label">AUXILIARY RELAY (GPIO 26)</div>
+            <button class="btn-momentary"
+                    onmousedown="momentary(true)"
+                    onmouseup="momentary(false)"
+                    onmouseleave="momentary(false)">
+              HOLD TO ACTIVATE
+            </button>
+            <div class="switch-row">
+                <span style="font-size:12px; color:var(--text-muted)">Auto-Blink Mode</span>
+                <label class="switch">
+                  <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
+                  <span class="slider-toggle"></span>
+                </label>
             </div>
-            <div id="logs" class="mono"></div>
         </div>
       </div>
+
+      <!-- Logs Card -->
+      <div class="card" style="flex:1; min-height:300px;">
+        <h2>
+            System Logs
+            <button onclick="clearLogs()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:10px;">CLEAR</button>
+        </h2>
+        <div id="console" class="console"></div>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('ESP32')" id="f-ESP32"> ESP32</label>
+            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('PI')" id="f-PI"> PI</label>
+            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('RC')" id="f-RC"> RC</label>
+            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('SYS')" id="f-SYS"> SYS</label>
+        </div>
+      </div>
+
     </div>
   </div>
 
   <script>
     let lastId = 0;
-    let autoScroll = true;
     const filterState = { ESP32: true, PI: true, RC: true, SYS: true, GPIO: true };
+    let lastPktCount = 0;
+    let lastTime = Date.now();
 
     async function refreshStatus() {
-      const r = await fetch('/api/status');
-      const s = await r.json();
-      const healthy = s.link_alive ? 'ok' : 'bad';
-      document.getElementById('status').innerHTML =
-        `RC link: <span class="${healthy}">${s.link_alive ? 'LIVE' : 'LOST'}</span> (${s.last_rc_age_sec.toFixed(2)}s ago)\n` +
-        `Sender: ${s.last_rc_sender || '-'}\n` +
-        `UDP RX: ${s.packets_rx} | UART TX: ${s.packets_uart_tx}\n` +
-        `Relay State: <span class="${s.relay_state ? 'ok' : ''}">${s.relay_state ? 'HIGH' : 'LOW'}</span> (Blink: ${s.blink_active ? 'ON' : 'OFF'})\n` +
-        `Camera: <span class="${s.camera_ok ? 'ok' : 'bad'}">${s.camera_ok ? 'OK' : 'OFF'}</span>\n` +
-        `Ethernet: <span class="${s.ethernet_up ? 'ok' : 'bad'}">${s.ethernet_up ? 'UP' : 'DOWN'}</span>`;
+      try {
+        const r = await fetch('/api/status');
+        const s = await r.json();
+
+        // Update Link Badge
+        const badge = document.getElementById('link-badge');
+        if (s.link_alive) {
+            badge.className = 'status-badge live';
+            badge.innerText = 'LINK ACTIVE';
+        } else {
+            badge.className = 'status-badge lost';
+            badge.innerText = 'SIGNAL LOST';
+        }
+
+        // Update Stats
+        document.getElementById('stat-rc').innerText = s.last_rc_age_sec < 900 ? s.last_rc_age_sec.toFixed(2) + 's' : '--';
+
+        // Calculate PPS (approx)
+        const now = Date.now();
+        if (now - lastTime > 1000) {
+            const pps = Math.round((s.packets_rx - lastPktCount) * 1000 / (now - lastTime));
+            document.getElementById('stat-pps').innerText = pps > 0 ? pps : 0;
+            lastPktCount = s.packets_rx;
+            lastTime = now;
+        }
+
+      } catch(e) { console.error(e); }
     }
 
     async function refreshLogs() {
-      const r = await fetch('/api/logs?since=' + lastId);
-      const data = await r.json();
-      const box = document.getElementById('logs');
+      try {
+        const r = await fetch('/api/logs?since=' + lastId);
+        const data = await r.json();
+        const box = document.getElementById('console');
+        const shouldScroll = box.scrollHeight - box.scrollTop === box.clientHeight;
 
-      data.logs.forEach(item => {
-        lastId = item.id;
+        data.logs.forEach(item => {
+            lastId = item.id;
+            const row = document.createElement('div');
+            row.className = `log-entry row-${item.src}`;
 
-        const row = document.createElement('div');
-        row.className = `log-entry row-${item.src}`;
+            let color = '#ccc';
+            if (item.msg.includes('ERR') || item.msg.includes('FAIL')) color = '#ef4444';
+            else if (item.msg.includes('WARN')) color = '#f59e0b';
 
-        // Detect log level
-        let msgClass = '';
-        if (item.msg.includes('ERROR') || item.msg.includes('FAIL') || item.msg.includes('✗')) msgClass = 'msg-error';
-        else if (item.msg.includes('WARN') || item.msg.includes('⚠')) msgClass = 'msg-warn';
-        else if (item.msg.includes('INFO') || item.msg.includes('✓')) msgClass = 'msg-info';
+            row.innerHTML = `
+                <span class="ts">${item.ts}</span>
+                <span class="tag tag-${item.src}">${item.src}</span>
+                <span style="color:${color}">${item.msg}</span>
+            `;
 
-        row.innerHTML = `
-            <span class="log-ts">${item.ts}</span>
-            <span class="log-src src-${item.src}">${item.src}</span>
-            <span class="log-msg ${msgClass}">${item.msg}</span>
-        `;
+            if (!filterState[item.src] && filterState[item.src] !== undefined) {
+                row.style.display = 'none';
+            }
+            box.appendChild(row);
+        });
 
-        // Apply initial visibility based on filter
-        if (!filterState[item.src] && filterState[item.src] !== undefined) {
-            row.style.display = 'none';
-        }
+        // Limit history
+        while (box.children.length > 200) box.removeChild(box.firstChild);
 
-        box.appendChild(row);
-      });
-
-      // Cleanup old logs if too many (keep last 500 DOM elements)
-      while (box.children.length > 500) {
-        box.removeChild(box.firstChild);
-      }
-
-      if (autoScroll && data.logs.length > 0) {
-        box.scrollTop = box.scrollHeight;
-      }
+        if (shouldScroll || data.logs.length > 0) box.scrollTop = box.scrollHeight;
+      } catch(e) {}
     }
 
     function toggleSrc(src) {
         filterState[src] = document.getElementById('f-' + src).checked;
-        const rows = document.querySelectorAll('.row-' + src);
-        rows.forEach(r => r.style.display = filterState[src] ? 'flex' : 'none');
+        document.querySelectorAll('.row-' + src).forEach(r => r.style.display = filterState[src] ? 'flex' : 'none');
     }
 
-    function toggleScroll() {
-        autoScroll = !autoScroll;
-        const btn = document.getElementById('btn-scroll');
-        if (autoScroll) {
-            btn.classList.add('active');
-            const box = document.getElementById('logs');
-            box.scrollTop = box.scrollHeight;
-        } else {
-            btn.classList.remove('active');
-        }
+    function updateServo(id, val) {
+        document.getElementById('val-s'+id).innerText = val + '°';
+        fetch('/api/servo/'+id, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({angle: parseInt(val)})
+        });
+    }
+
+    function momentary(active) {
+        fetch('/api/gpio/momentary', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({active: active})
+        });
+    }
+
+    function toggleBlink(active) {
+        fetch('/api/gpio/blink', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({active: active})
+        });
     }
 
     function clearLogs() {
-        document.getElementById('logs').innerHTML = '';
+        document.getElementById('console').innerHTML = '';
     }
 
-    function updateServo(id, angle) {
-      document.getElementById('val-s' + id).innerText = angle + '°';
-      fetch(`/api/servo/${id}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({angle: parseInt(angle)})
-      });
-    }
-
-    function momentary(state) {
-      fetch('/api/gpio/momentary', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({active: state})
-      });
-    }
-
-    function toggleBlink(state) {
-      fetch('/api/gpio/blink', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({active: state})
-      });
-    }
-
-    setInterval(refreshStatus, 400);
+    setInterval(refreshStatus, 500);
     setInterval(refreshLogs, 500);
     refreshStatus();
     refreshLogs();
