@@ -17,8 +17,10 @@ ARCHITECTURE:
     
   • GPIO Control:
     - Servos on GPIO 12 & 13 (PWM)
-    - Momentary relay on GPIO 26
-    - Toggle/Blink relay on GPIO 19
+    - Combined Relay on GPIO 26:
+      - Can be held HIGH (Momentary override)
+      - Can be set to BLINK (Toggle mode)
+      - Priority: Momentary HIGH > Blink > Off
 
   • Flask Web Dashboard:
     - Serves HTML dashboard on <eth0_ip>:8080
@@ -55,8 +57,7 @@ except (ImportError, RuntimeError):
 # ─── GPIO CONFIGURATION ─────────────────────────────────────────────────────
 PIN_SERVO_1 = 12  # Hardware PWM 0
 PIN_SERVO_2 = 13  # Hardware PWM 1
-PIN_RELAY_MOMENTARY = 26
-PIN_RELAY_TOGGLE = 19
+PIN_RELAY_MOMENTARY = 26 # Used for both Momentary and Blink functions
 
 DASHBOARD_HTML = """
 <!doctype html>
@@ -100,6 +101,9 @@ DASHBOARD_HTML = """
     }
     input:checked + .slider { background-color: #2196F3; }
     input:checked + .slider:before { transform: translateX(26px); }
+
+    .gpio-section { margin-top: 20px; border-top: 1px solid #2a344d; padding-top: 10px; }
+    .gpio-title { font-size: 14px; color: #8a9bbd; margin-bottom: 10px; }
   </style>
 </head>
 <body>
@@ -126,18 +130,21 @@ DASHBOARD_HTML = """
           <span id="val-s2">90°</span>
         </div>
 
-        <div class="control-row" style="margin-top:20px; justify-content: space-around;">
-          <button onmousedown="momentary(true)" onmouseup="momentary(false)" onmouseleave="momentary(false)">
-            HOLD: HIGH Signal
-          </button>
+        <div class="gpio-section">
+            <div class="gpio-title">Relay Control (GPIO 26)</div>
+            <div class="control-row" style="justify-content: space-around;">
+              <button onmousedown="momentary(true)" onmouseup="momentary(false)" onmouseleave="momentary(false)">
+                HOLD: HIGH
+              </button>
 
-          <div style="display:flex; align-items:center;">
-            <span style="margin-right:10px;">Blink Toggle:</span>
-            <label class="switch">
-              <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
-              <span class="slider"></span>
-            </label>
-          </div>
+              <div style="display:flex; align-items:center;">
+                <span style="margin-right:10px;">Blink Mode:</span>
+                <label class="switch">
+                  <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
         </div>
       </div>
     </div>
@@ -171,7 +178,8 @@ DASHBOARD_HTML = """
         `UART RX Lines: ${s.uart_rx_lines}\n` +
         `Sender IP: ${s.last_rc_sender || '-'}\n` +
         `Camera: ${s.camera_ok ? 'OK' : 'NOT AVAILABLE'}\n` +
-        `Blink State: ${s.blink_active ? 'ON' : 'OFF'}`;
+        `Relay Blink: ${s.blink_active ? 'ON' : 'OFF'}\n` +
+        `Relay State: ${s.relay_state ? 'HIGH' : 'LOW'}`;
     }
 
     async function refreshLogs() {
@@ -259,7 +267,12 @@ class SharedState:
     uart_rx_lines: int = 0
     uart_open: bool = False
     camera_ok: bool = False
+
+    # GPIO State
     blink_active: bool = False
+    momentary_active: bool = False
+    relay_state: bool = False # Actual output state
+
     logs: Deque[dict] = field(default_factory=lambda: collections.deque(maxlen=1000))
     next_log_id: int = 1
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -299,17 +312,19 @@ class GpioController:
                 self.pwm1.start(7.5) # Neutral (90 deg)
                 self.pwm2.start(7.5) # Neutral (90 deg)
 
-                # Setup Relay Pins
+                # Setup Relay Pin (Shared)
                 GPIO.setup(PIN_RELAY_MOMENTARY, GPIO.OUT)
-                GPIO.setup(PIN_RELAY_TOGGLE, GPIO.OUT)
                 GPIO.output(PIN_RELAY_MOMENTARY, GPIO.LOW)
-                GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
 
                 state.add_log("GPIO", "Initialized successfully")
             except Exception as e:
                 state.add_log("GPIO", f"Init failed: {e}")
         else:
             state.add_log("GPIO", "Simulated mode (no hardware)")
+
+        # Start background update loop for priority logic
+        self.update_thread = threading.Thread(target=self._update_loop, daemon=True)
+        self.update_thread.start()
 
     def set_servo(self, servo_id: int, angle: int):
         # Map 0-180 degrees to 2.5-12.5 duty cycle
@@ -320,43 +335,57 @@ class GpioController:
             self.pwm1.ChangeDutyCycle(duty)
         elif self.pwm2 and servo_id == 2:
             self.pwm2.ChangeDutyCycle(duty)
-        else:
-            # self.state.add_log("GPIO", f"Simulated Servo {servo_id} -> {angle}°")
-            pass
 
     def set_momentary(self, active: bool):
-        if GPIO_AVAILABLE:
-            GPIO.output(PIN_RELAY_MOMENTARY, GPIO.HIGH if active else GPIO.LOW)
-        # self.state.add_log("GPIO", f"Momentary Relay: {'ON' if active else 'OFF'}")
+        with self.state.lock:
+            self.state.momentary_active = active
+        # State update handled in loop
 
     def set_blink(self, active: bool):
         with self.state.lock:
             self.state.blink_active = active
+        # State update handled in loop
 
-        if active:
-            # Always clear the stop event so the loop can run (or continue running)
-            self.blink_stop_event.clear()
+    def _update_loop(self):
+        """
+        Manages the state of the relay pin based on priority:
+        1. Momentary Button (Overrides everything -> HIGH)
+        2. Blink Toggle (Toggles High/Low)
+        3. Default (LOW)
+        """
+        blink_state = False
+        last_blink_time = 0.0
 
-            if self.blink_thread is None or not self.blink_thread.is_alive():
-                self.blink_thread = threading.Thread(target=self._blink_loop, daemon=True)
-                self.blink_thread.start()
-                self.state.add_log("GPIO", "Blink ON")
-        else:
-            self.blink_stop_event.set()
+        while True:
+            now = time.monotonic()
+
+            # Blink logic (0.5s interval)
+            if now - last_blink_time > 0.5:
+                blink_state = not blink_state
+                last_blink_time = now
+
+            # Determine target output
+            target_high = False
+
+            with self.state.lock:
+                momentary = self.state.momentary_active
+                blinking = self.state.blink_active
+
+            if momentary:
+                target_high = True
+            elif blinking:
+                target_high = blink_state
+            else:
+                target_high = False
+
+            # Apply output
             if GPIO_AVAILABLE:
-                GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
-            self.state.add_log("GPIO", "Blink OFF")
+                GPIO.output(PIN_RELAY_MOMENTARY, GPIO.HIGH if target_high else GPIO.LOW)
 
-    def _blink_loop(self):
-        state = False
-        while not self.blink_stop_event.is_set():
-            state = not state
-            if GPIO_AVAILABLE:
-                GPIO.output(PIN_RELAY_TOGGLE, GPIO.HIGH if state else GPIO.LOW)
-            time.sleep(0.5)
-        # Ensure off when stopped
-        if GPIO_AVAILABLE:
-            GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
+            with self.state.lock:
+                self.state.relay_state = target_high
+
+            time.sleep(0.05) # 20Hz update rate
 
     def cleanup(self):
         if GPIO_AVAILABLE:
@@ -572,6 +601,7 @@ def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args
                 "last_rc_sender": state.last_rc_sender,
                 "camera_ok": state.camera_ok,
                 "blink_active": state.blink_active,
+                "relay_state": state.relay_state,
             }
         return jsonify(payload)
 
