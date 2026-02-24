@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Underwater Rover Native Pi Service - Transparent iBUS Bridge
+Underwater Rover Native Pi Service - Transparent iBUS Bridge + GPIO Control
 
 This module implements the core rover relay system that runs on Raspberry Pi 4B:
 
@@ -15,10 +15,17 @@ ARCHITECTURE:
     - Parses JPEG frame boundaries (0xFFD8 start, 0xFFD9 end)
     - Serves latest JPEG frame to web dashboard every ~33ms
     
+  • GPIO Control:
+    - Servos on GPIO 12 & 13 (PWM)
+    - Momentary relay on GPIO 26
+    - Toggle/Blink relay on GPIO 19
+
   • Flask Web Dashboard:
     - Serves HTML dashboard on <eth0_ip>:8080
     - /api/status: Real-time JSON status
     - /api/logs: Streaming log entries from Pi AND ESP32
+    - /api/servo/<id>: Control servo angle
+    - /api/gpio/<action>: Control relay pins
     
 DATA FLOW:
   Flysky RC → CP2102 (USB) → Laptop UDP → Pi UDP:5000 → Pi /dev/serial0 UART → ESP32 RX
@@ -34,9 +41,22 @@ import subprocess
 import threading
 import serial
 from dataclasses import dataclass, field
-from typing import Deque, List
+from typing import Deque, List, Optional
 
-from flask import Flask, Response, jsonify, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, request
+
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except (ImportError, RuntimeError):
+    GPIO_AVAILABLE = False
+    print("Warning: RPi.GPIO not found or not on Pi. GPIO features will be simulated.")
+
+# ─── GPIO CONFIGURATION ─────────────────────────────────────────────────────
+PIN_SERVO_1 = 12  # Hardware PWM 0
+PIN_SERVO_2 = 13  # Hardware PWM 1
+PIN_RELAY_MOMENTARY = 26
+PIN_RELAY_TOGGLE = 19
 
 DASHBOARD_HTML = """
 <!doctype html>
@@ -48,24 +68,82 @@ DASHBOARD_HTML = """
   <style>
     body { font-family: Arial, sans-serif; background:#10131a; color:#e8ecf3; margin:0; }
     .wrap { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:16px; }
-    .card { background:#1a2030; border:1px solid #2a344d; border-radius:10px; padding:12px; }
+    .card { background:#1a2030; border:1px solid #2a344d; border-radius:10px; padding:12px; margin-bottom:16px; }
     h1 { margin:0 0 12px 0; font-size:20px; }
     h2 { margin:0 0 10px 0; font-size:16px; }
     .mono { font-family: monospace; white-space: pre-wrap; word-break: break-word; }
     .ok { color:#7CFC9A; }
     .bad { color:#ff7d7d; }
     img { width:100%; border-radius:8px; border:1px solid #2a344d; background:#000; }
+
+    /* GPIO Controls */
+    .control-row { display: flex; align-items: center; margin-bottom: 10px; }
+    .control-label { width: 80px; font-weight: bold; }
+    input[type=range] { flex-grow: 1; margin: 0 10px; }
+    button {
+      background: #2a344d; color: white; border: 1px solid #4a5a7d;
+      padding: 8px 16px; border-radius: 4px; cursor: pointer;
+      font-weight: bold;
+    }
+    button:active { background: #4a5a7d; }
+    button.active { background: #7CFC9A; color: #1a2030; }
+
+    .switch { position: relative; display: inline-block; width: 50px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #ccc; transition: .4s; border-radius: 24px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px;
+      background-color: white; transition: .4s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: #2196F3; }
+    input:checked + .slider:before { transform: translateX(26px); }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="card">
-      <h1>Underwater Rover Dashboard (UART Relay)</h1>
-      <h2>Live Camera</h2>
-      <img src="/video_feed" alt="camera" />
-    </div>
     <div>
-      <div class="card" style="margin-bottom:16px;">
+      <div class="card">
+        <h1>Underwater Rover Dashboard</h1>
+        <h2>Live Camera</h2>
+        <img src="/video_feed" alt="camera" />
+      </div>
+
+      <div class="card">
+        <h2>GPIO Controls</h2>
+
+        <div class="control-row">
+          <div class="control-label">Servo 1</div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(1, this.value)">
+          <span id="val-s1">90°</span>
+        </div>
+
+        <div class="control-row">
+          <div class="control-label">Servo 2</div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(2, this.value)">
+          <span id="val-s2">90°</span>
+        </div>
+
+        <div class="control-row" style="margin-top:20px; justify-content: space-around;">
+          <button onmousedown="momentary(true)" onmouseup="momentary(false)" onmouseleave="momentary(false)">
+            HOLD: HIGH Signal
+          </button>
+
+          <div style="display:flex; align-items:center;">
+            <span style="margin-right:10px;">Blink Toggle:</span>
+            <label class="switch">
+              <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
         <h2>Status</h2>
         <div id="status" class="mono">loading...</div>
       </div>
@@ -92,7 +170,8 @@ DASHBOARD_HTML = """
         `UART TX: ${s.packets_uart_tx}\n` +
         `UART RX Lines: ${s.uart_rx_lines}\n` +
         `Sender IP: ${s.last_rc_sender || '-'}\n` +
-        `Camera: ${s.camera_ok ? 'OK' : 'NOT AVAILABLE'}`;
+        `Camera: ${s.camera_ok ? 'OK' : 'NOT AVAILABLE'}\n` +
+        `Blink State: ${s.blink_active ? 'ON' : 'OFF'}`;
     }
 
     async function refreshLogs() {
@@ -103,7 +182,32 @@ DASHBOARD_HTML = """
         lastId = item.id;
         box.textContent += `[${item.ts}] ${item.src}: ${item.msg}\n`;
       }
-      box.scrollTop = box.scrollHeight;
+      if (data.logs.length > 0) box.scrollTop = box.scrollHeight;
+    }
+
+    function updateServo(id, angle) {
+      document.getElementById('val-s' + id).innerText = angle + '°';
+      fetch(`/api/servo/${id}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({angle: parseInt(angle)})
+      });
+    }
+
+    function momentary(state) {
+      fetch('/api/gpio/momentary', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({active: state})
+      });
+    }
+
+    function toggleBlink(state) {
+      fetch('/api/gpio/blink', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({active: state})
+      });
     }
 
     setInterval(refreshStatus, 400);
@@ -155,6 +259,7 @@ class SharedState:
     uart_rx_lines: int = 0
     uart_open: bool = False
     camera_ok: bool = False
+    blink_active: bool = False
     logs: Deque[dict] = field(default_factory=lambda: collections.deque(maxlen=1000))
     next_log_id: int = 1
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -172,6 +277,92 @@ class SharedState:
     def get_logs_since(self, since_id: int) -> List[dict]:
         with self.lock:
             return [entry for entry in self.logs if entry["id"] > since_id]
+
+class GpioController:
+    def __init__(self, state: SharedState):
+        self.state = state
+        self.pwm1 = None
+        self.pwm2 = None
+        self.blink_thread = None
+        self.blink_stop_event = threading.Event()
+
+        if GPIO_AVAILABLE:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setwarnings(False)
+
+                # Setup Servos
+                GPIO.setup(PIN_SERVO_1, GPIO.OUT)
+                GPIO.setup(PIN_SERVO_2, GPIO.OUT)
+                self.pwm1 = GPIO.PWM(PIN_SERVO_1, 50) # 50Hz
+                self.pwm2 = GPIO.PWM(PIN_SERVO_2, 50) # 50Hz
+                self.pwm1.start(7.5) # Neutral (90 deg)
+                self.pwm2.start(7.5) # Neutral (90 deg)
+
+                # Setup Relay Pins
+                GPIO.setup(PIN_RELAY_MOMENTARY, GPIO.OUT)
+                GPIO.setup(PIN_RELAY_TOGGLE, GPIO.OUT)
+                GPIO.output(PIN_RELAY_MOMENTARY, GPIO.LOW)
+                GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
+
+                state.add_log("GPIO", "Initialized successfully")
+            except Exception as e:
+                state.add_log("GPIO", f"Init failed: {e}")
+        else:
+            state.add_log("GPIO", "Simulated mode (no hardware)")
+
+    def set_servo(self, servo_id: int, angle: int):
+        # Map 0-180 degrees to 2.5-12.5 duty cycle
+        duty = 2.5 + (angle / 18.0)
+        duty = max(2.5, min(12.5, duty))
+
+        if self.pwm1 and servo_id == 1:
+            self.pwm1.ChangeDutyCycle(duty)
+        elif self.pwm2 and servo_id == 2:
+            self.pwm2.ChangeDutyCycle(duty)
+        else:
+            # self.state.add_log("GPIO", f"Simulated Servo {servo_id} -> {angle}°")
+            pass
+
+    def set_momentary(self, active: bool):
+        if GPIO_AVAILABLE:
+            GPIO.output(PIN_RELAY_MOMENTARY, GPIO.HIGH if active else GPIO.LOW)
+        # self.state.add_log("GPIO", f"Momentary Relay: {'ON' if active else 'OFF'}")
+
+    def set_blink(self, active: bool):
+        with self.state.lock:
+            self.state.blink_active = active
+
+        if active:
+            # Always clear the stop event so the loop can run (or continue running)
+            self.blink_stop_event.clear()
+
+            if self.blink_thread is None or not self.blink_thread.is_alive():
+                self.blink_thread = threading.Thread(target=self._blink_loop, daemon=True)
+                self.blink_thread.start()
+                self.state.add_log("GPIO", "Blink ON")
+        else:
+            self.blink_stop_event.set()
+            if GPIO_AVAILABLE:
+                GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
+            self.state.add_log("GPIO", "Blink OFF")
+
+    def _blink_loop(self):
+        state = False
+        while not self.blink_stop_event.is_set():
+            state = not state
+            if GPIO_AVAILABLE:
+                GPIO.output(PIN_RELAY_TOGGLE, GPIO.HIGH if state else GPIO.LOW)
+            time.sleep(0.5)
+        # Ensure off when stopped
+        if GPIO_AVAILABLE:
+            GPIO.output(PIN_RELAY_TOGGLE, GPIO.LOW)
+
+    def cleanup(self):
+        if GPIO_AVAILABLE:
+            if self.pwm1: self.pwm1.stop()
+            if self.pwm2: self.pwm2.stop()
+            GPIO.cleanup()
 
 def bridge_loop(state: SharedState, args):
     """
@@ -359,7 +550,7 @@ class CameraSource:
         with self.lock:
             return self.latest_jpeg
 
-def create_app(state: SharedState, cam: CameraSource, args):
+def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args):
     app = Flask(__name__)
 
     @app.get("/")
@@ -380,6 +571,7 @@ def create_app(state: SharedState, cam: CameraSource, args):
                 "uart_open": state.uart_open,
                 "last_rc_sender": state.last_rc_sender,
                 "camera_ok": state.camera_ok,
+                "blink_active": state.blink_active,
             }
         return jsonify(payload)
 
@@ -391,6 +583,27 @@ def create_app(state: SharedState, cam: CameraSource, args):
         except ValueError:
             since = 0
         return jsonify({"logs": state.get_logs_since(since)})
+
+    @app.post("/api/servo/<int:id>")
+    def set_servo(id):
+        data = request.json
+        angle = data.get("angle", 90)
+        gpio.set_servo(id, angle)
+        return jsonify({"status": "ok", "id": id, "angle": angle})
+
+    @app.post("/api/gpio/momentary")
+    def gpio_momentary():
+        data = request.json
+        active = data.get("active", False)
+        gpio.set_momentary(active)
+        return jsonify({"status": "ok", "momentary": active})
+
+    @app.post("/api/gpio/blink")
+    def gpio_blink():
+        data = request.json
+        active = data.get("active", False)
+        gpio.set_blink(active)
+        return jsonify({"status": "ok", "blink": active})
 
     @app.get("/video_feed")
     def video_feed():
@@ -427,6 +640,7 @@ def main():
     print("="*60 + "\\n")
 
     state = SharedState()
+    gpio = GpioController(state)
     cam = CameraSource(state)
 
     bridge_thread = threading.Thread(target=bridge_loop, args=(state, args), daemon=True)
@@ -436,8 +650,12 @@ def main():
     cam_thread.start()
     
     time.sleep(0.5)
-    app = create_app(state, cam, args)
-    app.run(host=args.web_host, port=args.web_port, debug=False, threaded=True, use_reloader=False)
+    app = create_app(state, cam, gpio, args)
+
+    try:
+        app.run(host=args.web_host, port=args.web_port, debug=False, threaded=True, use_reloader=False)
+    finally:
+        gpio.cleanup()
 
 if __name__ == "__main__":
     main()

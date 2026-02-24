@@ -35,7 +35,7 @@ constexpr int PIN_IBUS_TX = 17;
 constexpr int PIN_CAL_BUTTON = 18; // active LOW, wire button to GND
 constexpr int PIN_RGB = 48;
 constexpr int NUM_PIXELS = 1;
-constexpr bool IBUS_DEBUG_ONLY = true; // set false for full ROV control
+constexpr bool IBUS_DEBUG_ONLY = false; // set false for full ROV control
 
 // ---------- RC mapping ----------
 static IBusBM ibus;
