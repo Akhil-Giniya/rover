@@ -117,17 +117,36 @@ def read_ibus_frame(ser: serial.Serial):
         second = ser.read(1)
         if not second:
             return None
+
+        # Handle case where we might have sync slipped to the middle of a stream
+        # e.g., ... 0x20 0x20 0x40 ...
+        # If second byte is 0x20, it might be the START of the new frame, not the 2nd byte.
         if second == b"\x20":
-            # Two consecutive 0x20 bytes: the second could be the real header start.
-            # Re-check by treating second as the new first.
-            first = second
-            second = ser.read(1)
-            if not second:
+            # Peek next byte to see if it is 0x40
+            # Note: pyserial peek isn't standard, so we just read one more.
+            third = ser.read(1)
+            if not third:
                 return None
+
+            if third == b"\x40":
+                # Found 0x20 0x20 0x40 -> The second 0x20 was the start.
+                # We have consumed header (second, third).
+                # Need to read rest.
+                rest = ser.read(IBUS_FRAME_LEN - 2)
+                if len(rest) != IBUS_FRAME_LEN - 2:
+                    return None
+                return b"\x20\x40" + rest
+            elif third == b"\x20":
+                # 0x20 0x20 0x20 ... keep trying to sync
+                continue
+            else:
+                # 0x20 0x20 0x?? -> Not a valid header. Reset.
+                continue
+
         if second != b"\x40":
             continue
 
-        # Read remaining 30 bytes
+        # Found 0x20 0x40
         rest = ser.read(IBUS_FRAME_LEN - 2)
         if len(rest) != IBUS_FRAME_LEN - 2:
             return None

@@ -132,6 +132,15 @@ Expected to see:
 
 ### 6. Flash ESP32 Firmware
 
+#### Required Arduino Libraries
+Before uploading, install these libraries via **Tools → Manage Libraries** in Arduino IDE:
+1. `IBusBM` (by Brian Taylor)
+2. `MPU9250_WE` (by Wolfgang Ewald)
+3. `MS5837` (by Blue Robotics)
+4. `ESP32Servo` (by Kevin Harrington)
+5. `Adafruit_NeoPixel` (by Adafruit)
+
+#### Steps:
 ```bash
 # Download Arduino IDE: https://www.arduino.cc/en/software
 # Install ESP32 board support: Tools → Board Manager → "esp32" by Espressif
@@ -141,9 +150,10 @@ Expected to see:
 # Tools → Port → "/dev/ttyUSB0" (your ESP32 COM port)
 # Sketch → Upload (Ctrl+U)
 
-# Expected serial output:
-# ESP32 UART receiver ready
-# RC: 1500 1500 1000 2000 ...
+# Expected serial output (115200 baud):
+# BOOT: setup start
+# BOOT: iBus init done
+# BOOT: IMU init OK ...
 ```
 
 ### 7. Start PC RC Sender (on Laptop)
