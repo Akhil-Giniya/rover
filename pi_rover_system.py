@@ -254,7 +254,7 @@ DASHBOARD_HTML = """
       </div>
 
       <div class="feed-container">
-        <img class="feed" src="/video_feed" alt="Live Feed" onerror="this.style.display='none'">
+        <img class="feed" src="/video_feed" alt="Live Feed" onerror="var el=this; setTimeout(function(){el.src='/video_feed?t='+Date.now();},2000)">
         <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:var(--text-muted); font-size:12px; z-index:-1;">NO SIGNAL</div>
       </div>
 
@@ -851,7 +851,7 @@ class CameraSource:
                     if not byte2: break
                 if not byte2: continue
                 
-                jpeg_data = b'\xff\xd8'
+                jpeg_data = bytearray(b'\xff\xd8')
                 byte1 = self.process.stdout.read(1)
                 byte2 = self.process.stdout.read(1)
                 jpeg_data += byte1 + byte2
@@ -864,7 +864,7 @@ class CameraSource:
                     
                 if byte2:
                     with self.lock:
-                        self.latest_jpeg = jpeg_data
+                        self.latest_jpeg = bytes(jpeg_data)
                     with self.state.lock:
                         self.state.camera_ok = True
                 else:
@@ -944,6 +944,7 @@ def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args
                     time.sleep(0.1)
                     continue
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
+                time.sleep(1 / 30)
         return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
     return app
