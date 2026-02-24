@@ -41,6 +41,7 @@ import subprocess
 import threading
 import serial
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional
 
@@ -788,23 +789,45 @@ class CameraSource:
         self.process = None
 
     def start_pipeline(self):
+        # Detect camera command
+        cmd_bin = shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
+
+        if not cmd_bin:
+            self.state.add_log("CAM", "ERROR: No libcamera-vid/rpicam-vid found!")
+            with self.state.lock: self.state.camera_ok = False
+            return False
+
+        # Max Wide Angle Configuration:
+        # We request 1296x972 (4:3 aspect ratio) to ensure full sensor readout
+        # without 16:9 cropping. Mode 4 on v2 cameras is 1640x1232 (also 4:3).
+        # Specifying a resolution close to this ratio usually gets the best FoV.
         cmd = [
-            "rpicam-vid",
+            cmd_bin,
             "--codec", "mjpeg",
-            # Full-sensor binned mode → maximum wide-angle field of view
-            "--mode", "4",          # Mode 4: 1640x1232 full-frame (Pi Cam v2/HQ)
-            "--width", "960",       # Scale down for network streaming
-            "--height", "720",
+            "--width", "1296",      # 4:3 ratio for max vertical FoV
+            "--height", "972",
             "--framerate", "30",
             "--timeout", "0",
             "--nopreview",
             "--output", "-",
+            "--denoise", "cdn_off"  # Performance optimization
         ]
+
         try:
-            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
-            self.state.add_log("CAM", "rpicam-vid pipeline started")
+            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8)
+            self.state.add_log("CAM", f"Pipeline started: {cmd_bin} (Max FoV)")
             with self.state.lock:
                 self.state.camera_ok = True
+
+            # Monitor stderr in a separate thread to log camera errors
+            def monitor_stderr(proc):
+                for line in iter(proc.stderr.readline, b''):
+                    line_str = line.decode('utf-8', errors='replace').strip()
+                    if "error" in line_str.lower() or "fail" in line_str.lower():
+                        self.state.add_log("CAM", f"STDERR: {line_str}")
+
+            threading.Thread(target=monitor_stderr, args=(self.process,), daemon=True).start()
+
             return True
         except Exception as e:
             self.state.add_log("CAM", f"Failed to start camera: {e}")
