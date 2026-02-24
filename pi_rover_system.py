@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Underwater Rover Native Pi Service - Transparent iBUS Bridge + GPIO Control
+Underwater Rover Native Pi Service - Transparent iBUS Bridge + GPIO Control + Telemetry
 
 This module implements the core rover relay system that runs on Raspberry Pi 4B:
 
@@ -22,12 +22,10 @@ ARCHITECTURE:
       - Can be set to BLINK (Toggle mode)
       - Priority: Momentary HIGH > Blink > Off
 
-  • Flask Web Dashboard:
-    - Serves HTML dashboard on <eth0_ip>:8080
-    - /api/status: Real-time JSON status
-    - /api/logs: Streaming log entries from Pi AND ESP32
-    - /api/servo/<id>: Control servo angle
-    - /api/gpio/<action>: Control relay pins
+  • Telemetry & Logging:
+    - Monitors Pi system stats (CPU Temp, Voltage, RAM, Network)
+    - Aggregates logs from Pi system and ESP32 UART
+    - Provides a rich debug console on the dashboard
     
 DATA FLOW:
   Flysky RC → CP2102 (USB) → Laptop UDP → Pi UDP:5000 → Pi /dev/serial0 UART → ESP32 RX
@@ -42,6 +40,7 @@ import select
 import subprocess
 import threading
 import serial
+import re
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional
 
@@ -67,15 +66,16 @@ DASHBOARD_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rover Dashboard (UART Relay)</title>
   <style>
-    body { font-family: Arial, sans-serif; background:#10131a; color:#e8ecf3; margin:0; }
-    .wrap { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:16px; }
-    .card { background:#1a2030; border:1px solid #2a344d; border-radius:10px; padding:12px; margin-bottom:16px; }
-    h1 { margin:0 0 12px 0; font-size:20px; }
-    h2 { margin:0 0 10px 0; font-size:16px; }
-    .mono { font-family: monospace; white-space: pre-wrap; word-break: break-word; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; background:#10131a; color:#e8ecf3; margin:0; }
+    .wrap { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:16px; height: 95vh; box-sizing: border-box; }
+    .card { background:#1a2030; border:1px solid #2a344d; border-radius:10px; padding:12px; margin-bottom:16px; overflow: hidden; display: flex; flex-direction: column; }
+    h1 { margin:0 0 12px 0; font-size:20px; color: #fff; }
+    h2 { margin:0 0 10px 0; font-size:16px; color: #8a9bbd; border-bottom: 1px solid #2a344d; padding-bottom: 5px; }
+    .mono { font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
     .ok { color:#7CFC9A; }
     .bad { color:#ff7d7d; }
-    img { width:100%; border-radius:8px; border:1px solid #2a344d; background:#000; }
+    .warn { color:#FFB74D; }
+    img { width:100%; border-radius:8px; border:1px solid #2a344d; background:#000; flex-grow: 1; object-fit: contain; }
 
     /* GPIO Controls */
     .control-row { display: flex; align-items: center; margin-bottom: 10px; }
@@ -84,16 +84,16 @@ DASHBOARD_HTML = """
     button {
       background: #2a344d; color: white; border: 1px solid #4a5a7d;
       padding: 8px 16px; border-radius: 4px; cursor: pointer;
-      font-weight: bold;
+      font-weight: bold; transition: background 0.2s;
     }
-    button:active { background: #4a5a7d; }
+    button:active { background: #4a5a7d; transform: translateY(1px); }
     button.active { background: #7CFC9A; color: #1a2030; }
 
     .switch { position: relative; display: inline-block; width: 50px; height: 24px; }
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider {
       position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #ccc; transition: .4s; border-radius: 24px;
+      background-color: #4a5a7d; transition: .4s; border-radius: 24px;
     }
     .slider:before {
       position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px;
@@ -104,15 +104,47 @@ DASHBOARD_HTML = """
 
     .gpio-section { margin-top: 20px; border-top: 1px solid #2a344d; padding-top: 10px; }
     .gpio-title { font-size: 14px; color: #8a9bbd; margin-bottom: 10px; }
+
+    /* Telemetry Log Console */
+    .log-container { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .log-controls { display: flex; gap: 10px; margin-bottom: 8px; font-size: 12px; flex-wrap: wrap; }
+    .log-filter { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+    .log-filter input { margin: 0; }
+    #logs {
+        background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+        padding: 8px; overflow-y: scroll; flex-grow: 1; font-size: 12px; line-height: 1.4;
+    }
+    .log-entry { display: flex; gap: 8px; border-bottom: 1px solid #21262d; padding: 2px 0; }
+    .log-ts { color: #8b949e; min-width: 65px; }
+    .log-src { font-weight: bold; min-width: 50px; }
+    .log-msg { color: #c9d1d9; flex-grow: 1; }
+
+    /* Log Colors */
+    .src-ESP32 { color: #79c0ff; }
+    .src-PI { color: #d2a8ff; }
+    .src-RC { color: #7ee787; }
+    .src-GPIO { color: #ffa657; }
+    .src-SYS { color: #ff7b72; }
+
+    .msg-warn { color: #e3b341; }
+    .msg-error { color: #ff7b72; font-weight: bold; }
+    .msg-info { color: #a5d6ff; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #1a2030; }
+    ::-webkit-scrollbar-thumb { background: #4a5a7d; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #5a6a8d; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div>
-      <div class="card">
+    <!-- Left Column: Camera + GPIO -->
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div class="card" style="flex-grow:1;">
         <h1>Underwater Rover Dashboard</h1>
         <h2>Live Camera</h2>
-        <img src="/video_feed" alt="camera" />
+        <img src="/video_feed" alt="camera" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdib3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iIzEwMTMxYSIvPjx0ZXh0IHg9IjUwIiB5PSI1MCIgZmlsbD0iIzRhNWE3ZCIgZm9udC1zaXplPSIxMCIgdGV4dC1hbmNob3I9Im1pZGRsZSI+Q2FtZXJhIE9mZmxpbmU8L3RleHQ+PC9zdmc+'" />
       </div>
 
       <div class="card">
@@ -149,48 +181,108 @@ DASHBOARD_HTML = """
       </div>
     </div>
 
-    <div>
+    <!-- Right Column: Status + Logs -->
+    <div style="display:flex; flex-direction:column; gap:16px; height:100%;">
       <div class="card">
-        <h2>Status</h2>
-        <div id="status" class="mono">loading...</div>
+        <h2>System Status</h2>
+        <div id="status" class="mono" style="font-size:12px;">loading...</div>
       </div>
-      <div class="card">
-        <h2>Logs (Pi + ESP32)</h2>
-        <div id="logs" class="mono" style="height:420px; overflow:auto;"></div>
+      <div class="card" style="flex-grow:1;">
+        <h2>Telemetry & Debug Logs</h2>
+        <div class="log-container">
+            <div class="log-controls">
+                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('ESP32')" id="f-ESP32"> ESP32</label>
+                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('PI')" id="f-PI"> PI</label>
+                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('RC')" id="f-RC"> RC</label>
+                <label class="log-filter"><input type="checkbox" checked onchange="toggleSrc('SYS')" id="f-SYS"> SYS</label>
+                <button onclick="clearLogs()" style="padding:2px 8px; font-size:10px; margin-left:auto;">Clear</button>
+                <button onclick="toggleScroll()" id="btn-scroll" style="padding:2px 8px; font-size:10px;" class="active">Auto-Scroll</button>
+            </div>
+            <div id="logs" class="mono"></div>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
     let lastId = 0;
+    let autoScroll = true;
+    const filterState = { ESP32: true, PI: true, RC: true, SYS: true, GPIO: true };
 
     async function refreshStatus() {
       const r = await fetch('/api/status');
       const s = await r.json();
       const healthy = s.link_alive ? 'ok' : 'bad';
       document.getElementById('status').innerHTML =
-        `Ethernet: <span class="${s.ethernet_up ? 'ok' : 'bad'}">${s.ethernet_up ? 'UP' : 'DOWN'}</span>\n` +
-        `RC link: <span class="${healthy}">${s.link_alive ? 'LIVE' : 'LOST'}</span>\n` +
-        `Last packet age: ${s.last_rc_age_sec.toFixed(2)}s\n` +
-        `UART Port: <span class="${s.uart_open ? 'ok' : 'bad'}">${s.uart_open ? 'Open' : 'Error'}</span>\n` +
-        `UDP RX: ${s.packets_rx}\n` +
-        `UART TX: ${s.packets_uart_tx}\n` +
-        `UART RX Lines: ${s.uart_rx_lines}\n` +
-        `Sender IP: ${s.last_rc_sender || '-'}\n` +
-        `Camera: ${s.camera_ok ? 'OK' : 'NOT AVAILABLE'}\n` +
-        `Relay Blink: ${s.blink_active ? 'ON' : 'OFF'}\n` +
-        `Relay State: ${s.relay_state ? 'HIGH' : 'LOW'}`;
+        `RC link: <span class="${healthy}">${s.link_alive ? 'LIVE' : 'LOST'}</span> (${s.last_rc_age_sec.toFixed(2)}s ago)\n` +
+        `Sender: ${s.last_rc_sender || '-'}\n` +
+        `UDP RX: ${s.packets_rx} | UART TX: ${s.packets_uart_tx}\n` +
+        `Relay State: <span class="${s.relay_state ? 'ok' : ''}">${s.relay_state ? 'HIGH' : 'LOW'}</span> (Blink: ${s.blink_active ? 'ON' : 'OFF'})\n` +
+        `Camera: <span class="${s.camera_ok ? 'ok' : 'bad'}">${s.camera_ok ? 'OK' : 'OFF'}</span>\n` +
+        `Ethernet: <span class="${s.ethernet_up ? 'ok' : 'bad'}">${s.ethernet_up ? 'UP' : 'DOWN'}</span>`;
     }
 
     async function refreshLogs() {
       const r = await fetch('/api/logs?since=' + lastId);
       const data = await r.json();
       const box = document.getElementById('logs');
-      for (const item of data.logs) {
+
+      data.logs.forEach(item => {
         lastId = item.id;
-        box.textContent += `[${item.ts}] ${item.src}: ${item.msg}\n`;
+
+        const row = document.createElement('div');
+        row.className = `log-entry row-${item.src}`;
+
+        // Detect log level
+        let msgClass = '';
+        if (item.msg.includes('ERROR') || item.msg.includes('FAIL') || item.msg.includes('✗')) msgClass = 'msg-error';
+        else if (item.msg.includes('WARN') || item.msg.includes('⚠')) msgClass = 'msg-warn';
+        else if (item.msg.includes('INFO') || item.msg.includes('✓')) msgClass = 'msg-info';
+
+        row.innerHTML = `
+            <span class="log-ts">${item.ts}</span>
+            <span class="log-src src-${item.src}">${item.src}</span>
+            <span class="log-msg ${msgClass}">${item.msg}</span>
+        `;
+
+        // Apply initial visibility based on filter
+        if (!filterState[item.src] && filterState[item.src] !== undefined) {
+            row.style.display = 'none';
+        }
+
+        box.appendChild(row);
+      });
+
+      // Cleanup old logs if too many (keep last 500 DOM elements)
+      while (box.children.length > 500) {
+        box.removeChild(box.firstChild);
       }
-      if (data.logs.length > 0) box.scrollTop = box.scrollHeight;
+
+      if (autoScroll && data.logs.length > 0) {
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+
+    function toggleSrc(src) {
+        filterState[src] = document.getElementById('f-' + src).checked;
+        const rows = document.querySelectorAll('.row-' + src);
+        rows.forEach(r => r.style.display = filterState[src] ? 'flex' : 'none');
+    }
+
+    function toggleScroll() {
+        autoScroll = !autoScroll;
+        const btn = document.getElementById('btn-scroll');
+        if (autoScroll) {
+            btn.classList.add('active');
+            const box = document.getElementById('logs');
+            box.scrollTop = box.scrollHeight;
+        } else {
+            btn.classList.remove('active');
+        }
+    }
+
+    function clearLogs() {
+        document.getElementById('logs').innerHTML = '';
     }
 
     function updateServo(id, angle) {
@@ -258,6 +350,44 @@ def check_ethernet_up(interface: str) -> bool:
     except Exception:
         return False
 
+# ─── TELEMETRY HELPERS ──────────────────────────────────────────────────────
+def get_pi_temp():
+    try:
+        r = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
+        return r.replace("temp=", "").strip()
+    except:
+        return "N/A"
+
+def get_pi_volts():
+    try:
+        r = subprocess.check_output(["vcgencmd", "measure_volts"]).decode()
+        return r.replace("volt=", "").strip()
+    except:
+        return "N/A"
+
+def get_ram_usage():
+    try:
+        r = subprocess.check_output(["free", "-h"]).decode().splitlines()[1]
+        # Parse 'Mem: Total Used Free ...'
+        parts = r.split()
+        return f"{parts[2]}/{parts[1]}"
+    except:
+        return "N/A"
+
+def get_throttled_state():
+    try:
+        r = subprocess.check_output(["vcgencmd", "get_throttled"]).decode()
+        val = int(r.split("=")[1], 16)
+        if val == 0: return "OK"
+        msgs = []
+        if val & 0x1: msgs.append("Under-voltage")
+        if val & 0x2: msgs.append("Freq-capped")
+        if val & 0x4: msgs.append("Throttled")
+        if val & 0x8: msgs.append("Soft-temp-limit")
+        return ", ".join(msgs)
+    except:
+        return "Unknown"
+
 @dataclass
 class SharedState:
     last_rc_time: float = 0.0
@@ -290,6 +420,30 @@ class SharedState:
     def get_logs_since(self, since_id: int) -> List[dict]:
         with self.lock:
             return [entry for entry in self.logs if entry["id"] > since_id]
+
+class SystemMonitor:
+    def __init__(self, state: SharedState):
+        self.state = state
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+
+    def _monitor_loop(self):
+        while True:
+            temp = get_pi_temp()
+            volts = get_pi_volts()
+            ram = get_ram_usage()
+            throttled = get_throttled_state()
+
+            msg = f"Temp: {temp} | Volts: {volts} | RAM: {ram} | Pwr: {throttled}"
+
+            # Log warnings if system is stressed
+            if throttled != "OK" and throttled != "Unknown":
+                self.state.add_log("SYS", f"⚠ POWER WARNING: {throttled}")
+
+            # Regular info log
+            self.state.add_log("SYS", msg)
+
+            time.sleep(10) # Log every 10 seconds
 
 class GpioController:
     def __init__(self, state: SharedState):
@@ -672,6 +826,9 @@ def main():
     state = SharedState()
     gpio = GpioController(state)
     cam = CameraSource(state)
+
+    # Start System Monitor
+    sys_mon = SystemMonitor(state)
 
     bridge_thread = threading.Thread(target=bridge_loop, args=(state, args), daemon=True)
     cam_thread = threading.Thread(target=cam.run, daemon=True)
