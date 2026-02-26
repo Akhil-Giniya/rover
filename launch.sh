@@ -42,7 +42,7 @@ fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 step()  { echo -e "\n${BOLD}▶ $*${NC}"; }
 
 # ── SSH / SCP helpers (non-interactive with sshpass) ─────────────────────────
-SSH_OPTS="-o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o PasswordAuthentication=yes -o LogLevel=ERROR"
+SSH_OPTS="-o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o PasswordAuthentication=yes -o LogLevel=ERROR -o ControlMaster=no"
 SSH="sshpass -p ${PI_PASS} ssh ${SSH_OPTS}"
 SCP="sshpass -p ${PI_PASS} scp ${SSH_OPTS}"
 
@@ -253,15 +253,22 @@ VIDEO_CMD="cd ${PI_ROVER_DIR} && nohup python3 pi_web_video_stream.py --port ${P
 VIDEO_PID="$(pi_run "${VIDEO_CMD}" | tr -dc '0-9')"
 
 if [[ -n "${VIDEO_PID}" ]]; then
-  sleep 2
-  if pi_run "kill -0 ${VIDEO_PID} 2>/dev/null"; then
-    ok "Camera stream started (PID: ${VIDEO_PID})"
-    info "Stream URL : http://${PI_HOST}:${PI_PORT_VIDEO}"
-    info "Stream logs: ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/video_stream.log'"
-  else
-    warn "Camera stream exited early. Check: ssh ${PI_USER}@${PI_HOST} 'cat /tmp/video_stream.log'"
-    VIDEO_PID=""
-  fi
+  echo -n "  Waiting for camera stream to start"
+  for i in {1..20}; do
+    sleep 1
+    echo -n "."
+    if pi_run "curl -sf http://localhost:${PI_PORT_VIDEO}/ -o /dev/null 2>/dev/null"; then
+      echo ""
+      ok "Camera stream is UP → http://${PI_HOST}:${PI_PORT_VIDEO}"
+      info "Stream logs: ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/video_stream.log'"
+      break
+    fi
+    if [[ $i -eq 20 ]]; then
+      echo ""
+      warn "Camera stream not responding — check: ssh ${PI_USER}@${PI_HOST} 'cat /tmp/video_stream.log'"
+      VIDEO_PID=""
+    fi
+  done
 else
   warn "Camera stream did not return a PID — continuing without video."
 fi
