@@ -5,11 +5,16 @@ Flysky iBUS RC Sender for Underwater Rover
 Reads Flysky remote control data from CP2102 TTL converter (iBUS protocol)
 and sends it over UDP to Raspberry Pi for autonomous underwater vehicle control.
 
+Works on Linux, macOS, and Windows – serial port is auto-detected on all platforms.
+
 Usage (auto-detect):
   python3 pc_rc_sender.py --pi-ip 192.168.50.2
 
-Usage (explicit):
+Usage (explicit – Linux):
   python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip 192.168.50.2 --pi-port 5000 --hz 50
+
+Usage (explicit – Windows):
+  python3 pc_rc_sender.py --serial-port COM3 --pi-ip 192.168.50.2 --pi-port 5000 --hz 50
 
 Data Flow:
   Flysky Remote (2.4GHz)
@@ -20,7 +25,6 @@ Data Flow:
     → Dashboard + UART → ESP32
 """
 import argparse
-import glob
 import os
 import socket
 import struct
@@ -28,6 +32,7 @@ import sys
 import time
 
 import serial
+from serial.tools import list_ports
 
 # iBUS Protocol Constants (Flysky Remote)
 IBUS_FRAME_LEN = 32        # Each iBUS frame is 32 bytes
@@ -36,19 +41,37 @@ IBUS_HEADER = b"\x20\x40"  # Frame starts with these two bytes
 
 def auto_detect_serial() -> str:
     """
-    Auto-detect CP2102 / CH340 USB serial adapters.
+    Auto-detect CP2102 / CH340 USB serial adapters (cross-platform).
 
-    Scans common Linux serial port patterns and returns the first match.
-    Prints a warning if multiple candidates exist (user should specify --serial-port).
+    Uses pyserial's built-in port enumeration to find USB serial adapters
+    on any OS (Linux, macOS, Windows).  Prefers known CP2102/CH340 VID:PID
+    pairs; falls back to any USB-serial port that was enumerated.
+    Prints a warning if multiple candidates exist (user should specify
+    --serial-port).
 
     Returns:
-        str: Device path (e.g. /dev/ttyUSB0) or empty string if none found
+        str: Port name (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows) or
+             empty string if none found.
     """
-    candidates = sorted(
-        glob.glob("/dev/ttyUSB*") +
-        glob.glob("/dev/ttyACM*") +
-        glob.glob("/dev/ttyS[1-9]*")           # Skip ttyS0 (often the console)
-    )
+    # Known USB-to-serial adapter VID:PID combinations
+    _KNOWN_VID_PID = {
+        (0x10C4, 0xEA60),  # Silicon Labs CP2102 / CP210x
+        (0x1A86, 0x7523),  # WCH CH340
+        (0x1A86, 0x55D4),  # WCH CH340 (newer variant)
+    }
+
+    preferred: list = []
+    fallback: list = []
+
+    for port in list_ports.comports():
+        if (port.vid, port.pid) in _KNOWN_VID_PID:
+            preferred.append(port.device)
+        elif port.vid is not None:
+            # Any other USB-to-serial device (e.g. FTDI, Prolific)
+            fallback.append(port.device)
+
+    candidates = sorted(preferred) or sorted(fallback)
+
     if not candidates:
         return ""
     if len(candidates) > 1:
@@ -162,7 +185,8 @@ def main():
     parser.add_argument(
         "--serial-port",
         default="",
-        help="CP2102 serial device, e.g. /dev/ttyUSB0. Auto-detected if not set.",
+        help="CP2102 serial device. Auto-detected if not set. "
+             "Examples: /dev/ttyUSB0 (Linux), COM3 (Windows).",
     )
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument("--pi-ip", required=True, help="Raspberry Pi IP address (e.g. 192.168.50.2)")
@@ -179,10 +203,11 @@ def main():
         print("[FAIL] No serial port found. Plug in CP2102 adapter or pass --serial-port.")
         sys.exit(1)
 
-    # Validate port exists before starting loop
-    if not os.path.exists(serial_port):
-        print(f"[FAIL] Serial device does not exist: {serial_port}")
-        print("       Check USB connection and driver (lsusb, dmesg | tail -20)")
+    # Validate port is accessible before starting loop
+    available_ports = {p.device for p in list_ports.comports()}
+    if serial_port not in available_ports and not os.path.exists(serial_port):
+        print(f"[FAIL] Serial device not found: {serial_port}")
+        print("       Check USB connection and driver (Device Manager on Windows, dmesg on Linux)")
         sys.exit(1)
 
     # Calculate send interval (1/Hz)
