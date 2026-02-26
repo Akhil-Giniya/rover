@@ -50,7 +50,6 @@ python3 pc_rc_sender.py \
 Open: **http://192.168.50.2:8080**
 
 You should see:
-- **Live camera feed** (if connected)
 - **Status panel** with Ethernet/RC link status
 - **Live logs** from Pi and ESP32
 
@@ -146,12 +145,6 @@ echo "1500 1500 1000 2000" | nc 192.168.50.2 5000
 - **Failsafe triggers** (when RC is lost >1s)
 - **System events** (startup, errors, etc.)
 
-### Camera Feed (Left Side)
-- **Live MJPEG stream** from Pi camera
-- Falls back gracefully if camera not connected
-
----
-
 ## 🛠️ Maintenance
 
 ### View Pi Logs (if running as service)
@@ -186,7 +179,7 @@ netstat -tuln | grep -E "5000|8080"
 ### On Raspberry Pi
 ```bash
 pip install -r requirements.txt
-# Installs: Flask, pyserial, opencv-python
+# Installs: Flask, pyserial
 ```
 
 ### On PC Laptop
@@ -204,7 +197,6 @@ pip install -r requirements.txt
 | RC link shows LOST | No UDP packets arriving | Check sender IP is `192.168.50.2` |
 | Cannot bind port 5000 | Port already in use | `pkill -f pi_rover_system` |
 | UART errors | ESP32 not connected | Check GPIO14/15 wiring |
-| No camera feed | Camera not connected/enabled | Check `/dev/video0` exists |
 | Wi-Fi/Bluetooth still on | Not disabled properly | Run `ethernet_only_setup.sh` and reboot |
 
 ---

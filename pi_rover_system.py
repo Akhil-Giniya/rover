@@ -10,11 +10,6 @@ ARCHITECTURE:
     - Forwards exact 32-byte binary iBUS frames directly to /dev/serial0 (ESP32)
     - Reads UART output from ESP32 and streams it to the web dashboard logs
     
-  • Camera Stream:
-    - Spawns rpicam-vid process to capture MJPEG video
-    - Parses JPEG frame boundaries (0xFFD8 start, 0xFFD9 end)
-    - Serves latest JPEG frame to web dashboard every ~33ms
-    
   • GPIO Control:
     - Servos on GPIO 12 & 13 (PWM)
     - Combined Relay on GPIO 26:
@@ -41,11 +36,11 @@ import subprocess
 import threading
 import serial
 import re
-import shutil
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request
 
 try:
     import RPi.GPIO as GPIO
@@ -66,379 +61,291 @@ DASHBOARD_HTML = """
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rover Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-
     :root {
-      --bg-dark: #09090b;
-      --card-bg: rgba(23, 23, 28, 0.7);
-      --accent: #6366f1;
-      --accent-glow: rgba(99, 102, 241, 0.4);
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --text-main: #f3f4f6;
-      --text-muted: #9ca3af;
-      --border: rgba(255, 255, 255, 0.1);
+      --bg1:#0a0a1a;
+      --glass:rgba(255,255,255,0.04);
+      --glass-b:rgba(255,255,255,0.09);
+      --gp:linear-gradient(135deg,#7c3aed,#06b6d4);
+      --success:#10b981;--warning:#f59e0b;--danger:#ef4444;
+      --text:#f1f5f9;--muted:#64748b;
+      --glp:rgba(124,58,237,0.35);--glc:rgba(6,182,212,0.35);
     }
-
-    body {
-      font-family: 'Inter', sans-serif;
-      background: radial-gradient(circle at top right, #1e1b4b, #09090b);
-      color: var(--text-main);
-      margin: 0;
-      height: 100vh;
-      overflow: hidden;
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:'Space Grotesk',sans-serif;
+      background:var(--bg1);
+      background-image:
+        radial-gradient(ellipse 80% 50% at 15% 10%,rgba(124,58,237,.18) 0%,transparent 60%),
+        radial-gradient(ellipse 60% 40% at 85% 90%,rgba(6,182,212,.14) 0%,transparent 60%),
+        radial-gradient(ellipse 50% 70% at 50% 50%,rgba(15,10,40,.9) 0%,transparent 100%);
+      color:var(--text);height:100vh;overflow:hidden;
     }
-
-    .wrap {
-      display: grid;
-      grid-template-columns: 1fr 380px;
-      gap: 20px;
-      padding: 20px;
-      height: 100vh;
-      box-sizing: border-box;
+    .wrap{display:grid;grid-template-columns:270px 1fr 290px;grid-template-rows:64px 1fr;gap:12px;padding:12px;height:100vh;}
+    .card{background:var(--glass);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%);border:1px solid var(--glass-b);border-radius:18px;padding:18px;display:flex;flex-direction:column;transition:border-color .3s,box-shadow .3s;position:relative;overflow:hidden;}
+    .card::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,transparent 60%);pointer-events:none;}
+    .card:hover{border-color:rgba(124,58,237,.3);box-shadow:0 0 30px rgba(124,58,237,.1)}
+    .header{grid-column:1/-1;flex-direction:row;align-items:center;justify-content:space-between;padding:10px 18px;background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.06);}
+    .brand{display:flex;align-items:center;gap:12px}
+    .brand-icon{width:38px;height:38px;border-radius:10px;background:var(--gp);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 20px var(--glp);}
+    .brand-name{font-size:16px;font-weight:700;letter-spacing:.5px;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+    .brand-sub{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
+    .hdr-right{display:flex;align-items:center;gap:16px}
+    .sys-time{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--muted)}
+    .sbadge{display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:1.5px;background:rgba(239,68,68,.12);color:var(--danger);border:1px solid rgba(239,68,68,.25);transition:all .4s;}
+    .sbadge.live{background:rgba(16,185,129,.12);color:var(--success);border-color:rgba(16,185,129,.3);box-shadow:0 0 18px rgba(16,185,129,.2);}
+    .led{width:7px;height:7px;border-radius:50%;background:var(--danger);box-shadow:0 0 8px var(--danger)}
+    .sbadge.live .led{background:var(--success);box-shadow:0 0 8px var(--success);animation:lp 1.5s ease-in-out infinite}
+    @keyframes lp{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
+    .stitle{font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+    .stitle::before{content:'';display:inline-block;width:3px;height:12px;border-radius:2px;background:var(--gp);margin-right:8px;box-shadow:0 0 8px var(--glp);}
+    .stat-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+    .stat-box{background:rgba(255,255,255,.03);border:1px solid var(--glass-b);border-radius:12px;padding:12px;text-align:center;transition:transform .2s,border-color .2s;}
+    .stat-box:hover{transform:translateY(-2px);border-color:rgba(124,58,237,.3)}
+    .stat-val{font-size:20px;font-weight:700;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:sh 3s ease-in-out infinite;}
+    @keyframes sh{0%,100%{filter:brightness(1)}50%{filter:brightness(1.4)}}
+    .stat-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
+    .titem{margin-bottom:10px}
+    .thdr{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px}
+    .ttrack{height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden}
+    .tbar{height:100%;border-radius:3px;background:var(--gp);box-shadow:0 0 8px var(--glp);transition:width .8s cubic-bezier(.4,0,.2,1)}
+    .cgrp{margin-bottom:16px}
+    .clbl{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:1.5px}
+    .cval{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    input[type=range]{-webkit-appearance:none;width:100%;background:transparent;cursor:pointer}
+    input[type=range]::-webkit-slider-runnable-track{height:5px;border-radius:3px;background:linear-gradient(90deg,rgba(124,58,237,.5),rgba(6,182,212,.5))}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;margin-top:-6.5px;box-shadow:0 0 12px var(--glp);transition:transform .15s,box-shadow .15s}
+    input[type=range]:hover::-webkit-slider-thumb{transform:scale(1.25);box-shadow:0 0 22px var(--glc)}
+    .rpanel{background:rgba(0,0,0,.2);border:1px solid var(--glass-b);border-radius:12px;padding:14px}
+    .rlbl{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:10px}
+    .btn-m{width:100%;padding:13px;background:var(--gp);border:none;border-radius:10px;color:#fff;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;box-shadow:0 0 22px var(--glp),0 4px 15px rgba(0,0,0,.3);transition:transform .15s,box-shadow .15s,filter .15s;position:relative;overflow:hidden;}
+    .btn-m::after{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.15),transparent);pointer-events:none}
+    .btn-m:hover{transform:translateY(-2px);box-shadow:0 0 38px var(--glp),0 8px 20px rgba(0,0,0,.4)}
+    .btn-m:active{transform:scale(.97);filter:brightness(.9)}
+    .sw-row{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
+    .sw-lbl{font-size:10px;color:var(--muted);letter-spacing:1px}
+    .sw{position:relative;width:46px;height:26px}
+    .sw input{opacity:0;width:0;height:0}
+    .tog{position:absolute;inset:0;cursor:pointer;background:rgba(255,255,255,.08);border-radius:26px;border:1px solid var(--glass-b);transition:background .3s,box-shadow .3s}
+    .tog::before{content:'';position:absolute;width:20px;height:20px;left:2px;top:2px;background:#fff;border-radius:50%;transition:transform .3s,box-shadow .3s}
+    input:checked+.tog{background:linear-gradient(135deg,rgba(124,58,237,.6),rgba(6,182,212,.6));border-color:rgba(124,58,237,.5);box-shadow:0 0 14px var(--glp)}
+    input:checked+.tog::before{transform:translateX(20px);box-shadow:0 0 8px var(--glc)}
+    .cam-wrap{flex:1;min-height:0;background:#000;border-radius:10px;overflow:hidden;position:relative;border:1px solid var(--glass-b)}
+    .cam-wrap img{width:100%;height:100%;object-fit:contain;display:block}
+    .cam-hud{position:absolute;top:10px;right:10px;display:flex;align-items:center;gap:8px}
+    .cam-st{display:flex;align-items:center;gap:6px;background:rgba(0,0,0,.6);backdrop-filter:blur(8px);padding:5px 12px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:1px;border:1px solid rgba(255,255,255,.1)}
+    .cam-dot{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 8px var(--success);animation:lp 1.5s infinite}
+    .cam-err .cam-dot{background:var(--danger);box-shadow:0 0 8px var(--danger);animation:none}
+    .btn-rc{background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.4);color:#a78bfa;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:1px;cursor:pointer;backdrop-filter:blur(8px);transition:background .2s,box-shadow .2s}
+    .btn-rc:hover{background:rgba(124,58,237,.4);box-shadow:0 0 12px var(--glp)}
+    .console{font-family:'JetBrains Mono',monospace;font-size:11px;background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+    .console::-webkit-scrollbar{width:4px}
+    .console::-webkit-scrollbar-track{background:transparent}
+    .console::-webkit-scrollbar-thumb{background:rgba(124,58,237,.4);border-radius:2px}
+    .log-entry{display:flex;gap:8px;opacity:.85;align-items:baseline;line-height:1.5}
+    .log-entry:hover{opacity:1}
+    .ts{color:#445566;min-width:56px;font-size:10px}
+    .tag{font-weight:700;border-radius:4px;padding:1px 5px;min-width:40px;text-align:center;font-size:9px;letter-spacing:1px}
+    .tag-ESP32{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.2)}
+    .tag-PI{background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.2)}
+    .tag-RC{background:rgba(52,211,153,.15);color:#34d399;border:1px solid rgba(52,211,153,.2)}
+    .tag-SYS{background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.2)}
+    .tag-GPIO{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
+    .fbar{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+    .chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;cursor:pointer;font-size:10px;font-weight:600;letter-spacing:1px;background:rgba(255,255,255,.05);border:1px solid var(--glass-b);color:var(--muted);transition:all .2s;user-select:none}
+    .chip:hover{background:rgba(124,58,237,.15);border-color:rgba(124,58,237,.3);color:#a78bfa}
+    .chip input{display:none}
+    .cdot{width:6px;height:6px;border-radius:50%}
+    @media(max-width:1100px){
+      .wrap{grid-template-columns:240px 1fr;grid-template-rows:auto 1fr 1fr;height:auto;overflow:auto}
+      .header{grid-column:1/-1}
+      .col-r{grid-column:1/-1}
     }
-
-    .card {
-      background: var(--card-bg);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 20px;
-      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
-      display: flex;
-      flex-direction: column;
-    }
-
-    h1 { margin: 0 0 16px 0; font-size: 18px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-main); }
-    h2 {
-      margin: 0 0 16px 0;
-      font-size: 13px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: var(--text-muted);
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    /* Live Feed */
-    .feed-container {
-      position: relative;
-      flex-grow: 1;
-      border-radius: 12px;
-      overflow: hidden;
-      border: 1px solid var(--border);
-      background: #000;
-    }
-    img.feed { width: 100%; height: 100%; object-fit: contain; display: block; }
-
-    .status-badge {
-      padding: 4px 8px;
-      border-radius: 6px;
-      font-size: 11px;
-      font-weight: 700;
-      background: rgba(255,255,255,0.1);
-    }
-    .status-badge.live { background: rgba(16, 185, 129, 0.2); color: var(--success); }
-    .status-badge.lost { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
-
-    /* Controls */
-    .control-group { margin-bottom: 24px; }
-    .control-label {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-    .slider-container { display: flex; align-items: center; gap: 12px; }
-
-    input[type=range] {
-      -webkit-appearance: none; width: 100%; background: transparent; cursor: pointer;
-    }
-    input[type=range]::-webkit-slider-runnable-track {
-      width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px;
-    }
-    input[type=range]::-webkit-slider-thumb {
-      height: 18px; width: 18px; border-radius: 50%; background: var(--accent);
-      margin-top: -6px; -webkit-appearance: none; box-shadow: 0 0 10px var(--accent-glow);
-      transition: transform 0.1s;
-    }
-    input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
-
-    /* Buttons & Toggles */
-    .btn-momentary {
-      width: 100%;
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
-      color: white;
-      border: none;
-      padding: 12px;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 13px;
-      cursor: pointer;
-      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
-      transition: all 0.2s;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .btn-momentary:active { transform: scale(0.98); opacity: 0.9; }
-
-    .switch-row { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
-    .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider-toggle {
-      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: rgba(255,255,255,0.1); transition: .4s; border-radius: 24px;
-    }
-    .slider-toggle:before {
-      position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
-      background-color: white; transition: .4s; border-radius: 50%;
-    }
-    input:checked + .slider-toggle { background-color: var(--accent); }
-    input:checked + .slider-toggle:before { transform: translateX(20px); }
-
-    /* Logs Console */
-    .console {
-      background: rgba(0,0,0,0.5);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px;
-      padding: 10px;
-      flex-grow: 1;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .log-entry { display: flex; gap: 8px; opacity: 0.9; }
-    .ts { color: #52525b; min-width: 60px; }
-    .tag { font-weight: bold; border-radius: 4px; padding: 0 4px; min-width: 35px; text-align: center; }
-
-    .tag-ESP32 { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
-    .tag-PI { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
-    .tag-RC { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-    .tag-SYS { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-    .tag-GPIO { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
-
-    /* Telemetry Grid */
-    .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-    .stat-box {
-      background: rgba(255,255,255,0.03);
-      border-radius: 8px;
-      padding: 10px;
-      text-align: center;
-    }
-    .stat-val { font-size: 18px; font-weight: 700; color: var(--text-main); }
-    .stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; margin-top: 4px; }
-
-    /* Responsive */
-    @media (max-width: 900px) {
-      .wrap { grid-template-columns: 1fr; height: auto; overflow: auto; }
-      .feed-container { height: 300px; }
-    }
+    @media(max-width:700px){.wrap{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <!-- Left Panel: Camera & Quick Actions -->
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <h1>ROVER COMMAND</h1>
-        <span id="link-badge" class="status-badge lost">DISCONNECTED</span>
-      </div>
-
-      <div class="feed-container">
-        <img class="feed" src="/video_feed" alt="Live Feed" onerror="var el=this; setTimeout(function(){el.src='/video_feed?t='+Date.now();},2000)">
-        <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); color:var(--text-muted); font-size:12px; z-index:-1;">NO SIGNAL</div>
-      </div>
-
-      <div style="display:flex; gap:12px; margin-top:16px;">
-        <div class="stat-box" style="flex:1">
-            <div id="stat-rc" class="stat-val">--</div>
-            <div class="stat-label">Last Packet</div>
-        </div>
-        <div class="stat-box" style="flex:1">
-            <div id="stat-pps" class="stat-val">0</div>
-            <div class="stat-label">Packets/Sec</div>
-        </div>
+<div class="wrap">
+  <div class="card header">
+    <div class="brand">
+      <div class="brand-icon">&#x1F916;</div>
+      <div>
+        <div class="brand-name">ROVER COMMAND CENTER</div>
+        <div class="brand-sub">Underwater Systems Interface &#xB7; v2.0</div>
       </div>
     </div>
-
-    <!-- Right Panel: Controls & Logs -->
-    <div style="display:flex; flex-direction:column; gap:16px;">
-
-      <!-- Controls Card -->
-      <div class="card" style="flex: 0 0 auto;">
-        <h2>Hardware Control</h2>
-
-        <!-- Servos -->
-        <div class="control-group">
-          <div class="control-label"><span>Camera Pan (Servo 1)</span> <span id="val-s1" style="color:var(--accent)">90°</span></div>
-          <div class="slider-container">
-            <input type="range" min="0" max="180" value="90" oninput="updateServo(1, this.value)">
-          </div>
-        </div>
-
-        <div class="control-group">
-          <div class="control-label"><span>Camera Tilt (Servo 2)</span> <span id="val-s2" style="color:var(--accent)">90°</span></div>
-          <div class="slider-container">
-            <input type="range" min="0" max="180" value="90" oninput="updateServo(2, this.value)">
-          </div>
-        </div>
-
-        <!-- Relay -->
-        <div style="background:rgba(255,255,255,0.03); padding:12px; border-radius:8px;">
-            <div class="control-label">AUXILIARY RELAY (GPIO 26)</div>
-            <button class="btn-momentary"
-                    onmousedown="momentary(true)"
-                    onmouseup="momentary(false)"
-                    onmouseleave="momentary(false)">
-              HOLD TO ACTIVATE
-            </button>
-            <div class="switch-row">
-                <span style="font-size:12px; color:var(--text-muted)">Auto-Blink Mode</span>
-                <label class="switch">
-                  <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
-                  <span class="slider-toggle"></span>
-                </label>
-            </div>
-        </div>
+    <div class="hdr-right">
+      <div class="sys-time" id="sys-time">--:--:--</div>
+      <div id="link-badge" class="sbadge lost">
+        <span class="led"></span>
+        <span id="link-txt">SIGNAL LOST</span>
       </div>
-
-      <!-- Logs Card -->
-      <div class="card" style="flex:1; min-height:300px;">
-        <h2>
-            System Logs
-            <button onclick="clearLogs()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:10px;">CLEAR</button>
-        </h2>
-        <div id="console" class="console"></div>
-        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
-            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('ESP32')" id="f-ESP32"> ESP32</label>
-            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('PI')" id="f-PI"> PI</label>
-            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('RC')" id="f-RC"> RC</label>
-            <label class="status-badge" style="cursor:pointer"><input type="checkbox" checked onchange="toggleSrc('SYS')" id="f-SYS"> SYS</label>
-        </div>
-      </div>
-
     </div>
   </div>
 
-  <script>
-    let lastId = 0;
-    const filterState = { ESP32: true, PI: true, RC: true, SYS: true, GPIO: true };
-    let lastPktCount = 0;
-    let lastTime = Date.now();
+  <div style="display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;">
+    <div class="card">
+      <div class="stitle">Link Telemetry</div>
+      <div class="stat-row">
+        <div class="stat-box"><div id="stat-rc" class="stat-val">--</div><div class="stat-lbl">Last Packet</div></div>
+        <div class="stat-box"><div id="stat-pps" class="stat-val">0</div><div class="stat-lbl">Packets/Sec</div></div>
+      </div>
+      <div class="titem">
+        <div class="thdr"><span>Signal Strength</span><span id="sig-pct">0%</span></div>
+        <div class="ttrack"><div class="tbar" id="sig-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+    <div class="card" style="flex:1">
+      <div class="stitle">Hardware Control</div>
+      <div class="cgrp">
+        <div class="clbl"><span>SERVO 1</span><span id="val-s1" class="cval">90&deg;</span></div>
+        <input type="range" min="0" max="180" value="90" oninput="updateServo(1,this.value)">
+      </div>
+      <div class="cgrp">
+        <div class="clbl"><span>SERVO 2</span><span id="val-s2" class="cval">90&deg;</span></div>
+        <input type="range" min="0" max="180" value="90" oninput="updateServo(2,this.value)">
+      </div>
+      <div class="rpanel">
+        <div class="rlbl">Auxiliary Relay &middot; GPIO 26</div>
+        <button class="btn-m" onmousedown="momentary(true)" onmouseup="momentary(false)" onmouseleave="momentary(false)">
+          &#x26A1; Hold to Activate
+        </button>
+        <div class="sw-row">
+          <span class="sw-lbl">Auto-Blink Mode</span>
+          <label class="sw">
+            <input type="checkbox" id="chk-blink" onchange="toggleBlink(this.checked)">
+            <span class="tog"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    async function refreshStatus() {
-      try {
-        const r = await fetch('/api/status');
-        const s = await r.json();
+  <div class="card" style="overflow:hidden;">
+    <div class="stitle">
+      Live Camera Feed
+      <button class="btn-rc" onclick="reconnectCam()">&#x21BB; RECONNECT</button>
+    </div>
+    <div class="cam-wrap">
+      <img id="cam-img" src="{{ video_url }}" alt="Camera feed" onerror="camError()" onload="camOk()" />
+      <div class="cam-hud">
+        <div id="cam-status-bar" class="cam-st">
+          <div class="cam-dot" id="cam-dot"></div>
+          <span id="cam-status-txt">LIVE</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
-        // Update Link Badge
-        const badge = document.getElementById('link-badge');
-        if (s.link_alive) {
-            badge.className = 'status-badge live';
-            badge.innerText = 'LINK ACTIVE';
-        } else {
-            badge.className = 'status-badge lost';
-            badge.innerText = 'SIGNAL LOST';
-        }
+  <div class="card col-r" style="overflow:hidden;">
+    <div class="stitle">
+      System Logs
+      <button onclick="clearLogs()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:10px;letter-spacing:1px;">&#x2715; CLEAR</button>
+    </div>
+    <div id="console" class="console"></div>
+    <div class="fbar">
+      <label class="chip"><input type="checkbox" checked onchange="toggleSrc('ESP32')" id="f-ESP32"><span class="cdot" style="background:#60a5fa"></span>ESP32</label>
+      <label class="chip"><input type="checkbox" checked onchange="toggleSrc('PI')" id="f-PI"><span class="cdot" style="background:#a78bfa"></span>PI</label>
+      <label class="chip"><input type="checkbox" checked onchange="toggleSrc('RC')" id="f-RC"><span class="cdot" style="background:#34d399"></span>RC</label>
+      <label class="chip"><input type="checkbox" checked onchange="toggleSrc('SYS')" id="f-SYS"><span class="cdot" style="background:#fb923c"></span>SYS</label>
+      <label class="chip"><input type="checkbox" checked onchange="toggleSrc('GPIO')" id="f-GPIO"><span class="cdot" style="background:#fbbf24"></span>GPIO</label>
+    </div>
+  </div>
+</div>
+<script>
+  let lastId = 0;
+  const filterState = { ESP32: true, PI: true, RC: true, SYS: true, GPIO: true };
+  let lastPktCount = 0, lastTime = Date.now();
 
-        // Update Stats
-        document.getElementById('stat-rc').innerText = s.last_rc_age_sec < 900 ? s.last_rc_age_sec.toFixed(2) + 's' : '--';
+  function tickClock() {
+    document.getElementById('sys-time').innerText = new Date().toLocaleTimeString('en-US',{hour12:false});
+  }
+  setInterval(tickClock, 1000); tickClock();
 
-        // Calculate PPS (approx)
-        const now = Date.now();
-        if (now - lastTime > 1000) {
-            const pps = Math.round((s.packets_rx - lastPktCount) * 1000 / (now - lastTime));
-            document.getElementById('stat-pps').innerText = pps > 0 ? pps : 0;
-            lastPktCount = s.packets_rx;
-            lastTime = now;
-        }
+  async function refreshStatus() {
+    try {
+      const r = await fetch('/api/status');
+      const s = await r.json();
+      const badge = document.getElementById('link-badge');
+      const txt = document.getElementById('link-txt');
+      if (s.link_alive) { badge.className='sbadge live'; txt.innerText='LINK ACTIVE'; }
+      else { badge.className='sbadge lost'; txt.innerText='SIGNAL LOST'; }
+      document.getElementById('stat-rc').innerText = s.last_rc_age_sec < 900 ? s.last_rc_age_sec.toFixed(2)+'s' : '--';
+      const now = Date.now();
+      if (now - lastTime > 1000) {
+        const pps = Math.round((s.packets_rx - lastPktCount)*1000/(now-lastTime));
+        const safe = pps > 0 ? pps : 0;
+        document.getElementById('stat-pps').innerText = safe;
+        const pct = Math.min(100, Math.round(safe/60*100));
+        document.getElementById('sig-bar').style.width = pct+'%';
+        document.getElementById('sig-pct').innerText = pct+'%';
+        lastPktCount = s.packets_rx; lastTime = now;
+      }
+    } catch(e) {}
+  }
 
-      } catch(e) { console.error(e); }
-    }
+  async function refreshLogs() {
+    try {
+      const r = await fetch('/api/logs?since='+lastId);
+      const data = await r.json();
+      const box = document.getElementById('console');
+      const atBottom = box.scrollHeight - box.scrollTop <= box.clientHeight + 5;
+      data.logs.forEach(item => {
+        lastId = item.id;
+        const row = document.createElement('div');
+        row.className = 'log-entry row-'+item.src;
+        let color = '#94a3b8';
+        if (item.msg.includes('ERR')||item.msg.includes('FAIL')) color = '#f87171';
+        else if (item.msg.includes('WARN')) color = '#fbbf24';
+        else if (item.msg.includes('OK')||item.msg.includes('open')) color = '#4ade80';
+        row.innerHTML = '<span class="ts">'+item.ts+'</span><span class="tag tag-'+item.src+'">'+item.src+'</span><span style="color:'+color+';flex:1">'+item.msg+'</span>';
+        if (!filterState[item.src] && filterState[item.src] !== undefined) row.style.display = 'none';
+        box.appendChild(row);
+      });
+      while (box.children.length > 200) box.removeChild(box.firstChild);
+      if (atBottom && data.logs.length > 0) box.scrollTop = box.scrollHeight;
+    } catch(e) {}
+  }
 
-    async function refreshLogs() {
-      try {
-        const r = await fetch('/api/logs?since=' + lastId);
-        const data = await r.json();
-        const box = document.getElementById('console');
-        const shouldScroll = box.scrollHeight - box.scrollTop === box.clientHeight;
+  function toggleSrc(src) {
+    filterState[src] = document.getElementById('f-'+src).checked;
+    document.querySelectorAll('.row-'+src).forEach(r => r.style.display = filterState[src] ? 'flex' : 'none');
+  }
+  function updateServo(id, val) {
+    document.getElementById('val-s'+id).innerText = val+'°';
+    fetch('/api/servo/'+id, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({angle:parseInt(val)})});
+  }
+  function momentary(active) {
+    fetch('/api/gpio/momentary', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});
+  }
+  function toggleBlink(active) {
+    fetch('/api/gpio/blink', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active})});
+  }
+  function clearLogs() { document.getElementById('console').innerHTML = ''; }
 
-        data.logs.forEach(item => {
-            lastId = item.id;
-            const row = document.createElement('div');
-            row.className = `log-entry row-${item.src}`;
+  function camOk() {
+    const bar=document.getElementById('cam-status-bar'),dot=document.getElementById('cam-dot'),txt=document.getElementById('cam-status-txt');
+    bar.classList.remove('cam-err');
+    dot.style.background='var(--success)'; dot.style.boxShadow='0 0 8px var(--success)'; dot.style.animation='lp 1.5s infinite';
+    txt.innerText='LIVE';
+  }
+  function camError() {
+    const bar=document.getElementById('cam-status-bar'),dot=document.getElementById('cam-dot'),txt=document.getElementById('cam-status-txt');
+    bar.classList.add('cam-err');
+    dot.style.background='var(--danger)'; dot.style.boxShadow='0 0 8px var(--danger)'; dot.style.animation='none';
+    txt.innerText='OFFLINE';
+  }
+  function reconnectCam() {
+    const img = document.getElementById('cam-img');
+    img.src = img.src.split('?')[0]+'?t='+Date.now();
+  }
 
-            let color = '#ccc';
-            if (item.msg.includes('ERR') || item.msg.includes('FAIL')) color = '#ef4444';
-            else if (item.msg.includes('WARN')) color = '#f59e0b';
-
-            row.innerHTML = `
-                <span class="ts">${item.ts}</span>
-                <span class="tag tag-${item.src}">${item.src}</span>
-                <span style="color:${color}">${item.msg}</span>
-            `;
-
-            if (!filterState[item.src] && filterState[item.src] !== undefined) {
-                row.style.display = 'none';
-            }
-            box.appendChild(row);
-        });
-
-        // Limit history
-        while (box.children.length > 200) box.removeChild(box.firstChild);
-
-        if (shouldScroll || data.logs.length > 0) box.scrollTop = box.scrollHeight;
-      } catch(e) {}
-    }
-
-    function toggleSrc(src) {
-        filterState[src] = document.getElementById('f-' + src).checked;
-        document.querySelectorAll('.row-' + src).forEach(r => r.style.display = filterState[src] ? 'flex' : 'none');
-    }
-
-    function updateServo(id, val) {
-        document.getElementById('val-s'+id).innerText = val + '°';
-        fetch('/api/servo/'+id, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({angle: parseInt(val)})
-        });
-    }
-
-    function momentary(active) {
-        fetch('/api/gpio/momentary', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({active: active})
-        });
-    }
-
-    function toggleBlink(active) {
-        fetch('/api/gpio/blink', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({active: active})
-        });
-    }
-
-    function clearLogs() {
-        document.getElementById('console').innerHTML = '';
-    }
-
-    setInterval(refreshStatus, 500);
-    setInterval(refreshLogs, 500);
-    refreshStatus();
-    refreshLogs();
-  </script>
+  setInterval(refreshStatus, 500);
+  setInterval(refreshLogs, 500);
+  refreshStatus(); refreshLogs();
+</script>
 </body>
 </html>
 """
@@ -520,8 +427,6 @@ class SharedState:
     packets_uart_tx: int = 0
     uart_rx_lines: int = 0
     uart_open: bool = False
-    camera_ok: bool = False
-
     # GPIO State
     blink_active: bool = False
     momentary_active: bool = False
@@ -561,7 +466,7 @@ class SystemMonitor:
             msg = f"Temp: {temp} | Volts: {volts} | RAM: {ram} | Pwr: {throttled}"
 
             # Log warnings if system is stressed
-            if throttled != "OK" and throttled != "Unknown":
+            if throttled not in ("OK", "Unknown"):
                 self.state.add_log("SYS", f"⚠ POWER WARNING: {throttled}")
 
             # Regular info log
@@ -726,17 +631,14 @@ def bridge_loop(state: SharedState, args):
 
                     # Forward raw 32-byte binary iBUS frame directly to ESP32.
                     # IBusBM on the ESP32 expects binary iBUS protocol, not ASCII text.
-                    if uart_dev:
-                        try:
-                            if len(data) == IBUS_FRAME_LEN and data[:2] == IBUS_HEADER:
-                                uart_dev.write(data)
-                                with state.lock:
-                                    state.packets_uart_tx += 1
-                        except Exception:
-                            pass  # Suppress serial disconnected errors to prevent spam
+                    if uart_dev and len(data) == IBUS_FRAME_LEN and data[:2] == IBUS_HEADER:
+                        with suppress(Exception):
+                            uart_dev.write(data)
+                            with state.lock:
+                                state.packets_uart_tx += 1
 
                     if state.packets_rx % 50 == 0:
-                        state.add_log("RC", f"Relayed 50 iBUS frames to ESP32")
+                        state.add_log("RC", "Relayed 50 iBUS frames to ESP32")
                     if state.packets_rx == 1:
                         print(f"✓ First raw iBUS packet received from {addr[0]}")
                         state.add_log("RC", f"First UDP frame from {sender}")
@@ -745,14 +647,12 @@ def bridge_loop(state: SharedState, args):
 
         # Read incoming UART logs from ESP32
         if uart_dev:
-            try:
-                available = uart_dev.in_waiting
-                if available > 0:
+            with suppress(Exception):
+                if available := uart_dev.in_waiting:
                     chunk = uart_dev.read(available)
                     for b in chunk:
                         if b == ord('\n'):
-                            line_str = uart_line_buf.decode('ascii', errors='replace').strip()
-                            if line_str:
+                            if line_str := uart_line_buf.decode('ascii', errors='replace').strip():
                                 state.add_log("ESP32", line_str)
                                 with state.lock:
                                     state.uart_rx_lines += 1
@@ -761,8 +661,6 @@ def bridge_loop(state: SharedState, args):
                             uart_line_buf.append(b)
                             if len(uart_line_buf) > 256:
                                 uart_line_buf.clear()  # Prevent memory leak on missing newlines
-            except Exception:
-                pass
 
         now_mono = time.monotonic()
         if last_rx_time == 0:
@@ -774,117 +672,19 @@ def bridge_loop(state: SharedState, args):
             # RC signal lost – stop forwarding frames.
             # ESP32 IBusBM has a built-in RC_LOST_US (500 ms) watchdog;
             # it enters failsafe automatically when frames stop arriving.
-            pass
             bucket = int(now_mono) // 5
             if bucket != last_no_rx_log_sec:
                 last_no_rx_log_sec = bucket
                 state.add_log("PI", "⚠ RC signal lost – sent NO_SIGNAL to ESP32")
 
-class CameraSource:
-    def __init__(self, state: SharedState):
-        self.state = state
-        self.lock = threading.Lock()
-        self.latest_jpeg = None
-        self.running = True
-        self.process = None
-
-    def start_pipeline(self):
-        # Detect camera command
-        cmd_bin = shutil.which("rpicam-vid") or shutil.which("libcamera-vid")
-
-        if not cmd_bin:
-            self.state.add_log("CAM", "ERROR: No libcamera-vid/rpicam-vid found!")
-            with self.state.lock: self.state.camera_ok = False
-            return False
-
-        # Max Wide Angle Configuration:
-        # We request 1296x972 (4:3 aspect ratio) to ensure full sensor readout
-        # without 16:9 cropping. Mode 4 on v2 cameras is 1640x1232 (also 4:3).
-        # Specifying a resolution close to this ratio usually gets the best FoV.
-        cmd = [
-            cmd_bin,
-            "--codec", "mjpeg",
-            "--width", "1296",      # 4:3 ratio for max vertical FoV
-            "--height", "972",
-            "--framerate", "30",
-            "--timeout", "0",
-            "--nopreview",
-            "--output", "-",
-            "--denoise", "cdn_off"  # Performance optimization
-        ]
-
-        try:
-            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8)
-            self.state.add_log("CAM", f"Pipeline started: {cmd_bin} (Max FoV)")
-            with self.state.lock:
-                self.state.camera_ok = True
-
-            # Monitor stderr in a separate thread to log camera errors
-            def monitor_stderr(proc):
-                for line in iter(proc.stderr.readline, b''):
-                    line_str = line.decode('utf-8', errors='replace').strip()
-                    if "error" in line_str.lower() or "fail" in line_str.lower():
-                        self.state.add_log("CAM", f"STDERR: {line_str}")
-
-            threading.Thread(target=monitor_stderr, args=(self.process,), daemon=True).start()
-
-            return True
-        except Exception as e:
-            self.state.add_log("CAM", f"Failed to start camera: {e}")
-            with self.state.lock:
-                self.state.camera_ok = False
-            return False
-
-    def run(self):
-        while self.running:
-            if self.process is None or self.process.poll() is not None:
-                if not self.start_pipeline():
-                    time.sleep(2.0)
-                    continue
-
-            try:
-                byte1 = self.process.stdout.read(1)
-                byte2 = self.process.stdout.read(1)
-                while byte1 != b'\xff' or byte2 != b'\xd8':
-                    byte1 = byte2
-                    byte2 = self.process.stdout.read(1)
-                    if not byte2: break
-                if not byte2: continue
-                
-                jpeg_data = bytearray(b'\xff\xd8')
-                byte1 = self.process.stdout.read(1)
-                byte2 = self.process.stdout.read(1)
-                jpeg_data += byte1 + byte2
-                
-                while byte1 != b'\xff' or byte2 != b'\xd9':
-                    byte1 = byte2
-                    byte2 = self.process.stdout.read(1)
-                    if not byte2: break
-                    jpeg_data += byte2
-                    
-                if byte2:
-                    with self.lock:
-                        self.latest_jpeg = bytes(jpeg_data)
-                    with self.state.lock:
-                        self.state.camera_ok = True
-                else:
-                    with self.state.lock:
-                        self.state.camera_ok = False
-            except Exception:
-                with self.state.lock:
-                    self.state.camera_ok = False
-                time.sleep(0.1)
-
-    def get_jpeg(self):
-        with self.lock:
-            return self.latest_jpeg
-
-def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args):
+def create_app(state: SharedState, gpio: GpioController, args):
     app = Flask(__name__)
 
     @app.get("/")
     def dashboard():
-        return render_template_string(DASHBOARD_HTML)
+        video_url = f"http://{args.listen_ip if args.listen_ip != '0.0.0.0' else '192.168.50.2'}:8090/video_feed"
+        return render_template_string(DASHBOARD_HTML, video_url=video_url)
+
 
     @app.get("/api/status")
     def api_status():
@@ -899,7 +699,6 @@ def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args
                 "uart_rx_lines": state.uart_rx_lines,
                 "uart_open": state.uart_open,
                 "last_rc_sender": state.last_rc_sender,
-                "camera_ok": state.camera_ok,
                 "blink_active": state.blink_active,
                 "relay_state": state.relay_state,
             }
@@ -907,9 +706,8 @@ def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args
 
     @app.get("/api/logs")
     def api_logs():
-        from flask import request as flask_request
         try:
-            since = int(flask_request.args.get("since", "0"))
+            since = int(request.args.get("since", "0"))
         except ValueError:
             since = 0
         return jsonify({"logs": state.get_logs_since(since)})
@@ -935,19 +733,8 @@ def create_app(state: SharedState, cam: CameraSource, gpio: GpioController, args
         gpio.set_blink(active)
         return jsonify({"status": "ok", "blink": active})
 
-    @app.get("/video_feed")
-    def video_feed():
-        def generate():
-            while True:
-                jpeg = cam.get_jpeg()
-                if jpeg is None:
-                    time.sleep(0.1)
-                    continue
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
-                time.sleep(1 / 30)
-        return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
-
     return app
+
 
 def main():
     parser = argparse.ArgumentParser(description="Pi Transparent UDP-to-UART Relay")
@@ -972,19 +759,16 @@ def main():
 
     state = SharedState()
     gpio = GpioController(state)
-    cam = CameraSource(state)
 
     # Start System Monitor
     sys_mon = SystemMonitor(state)
 
     bridge_thread = threading.Thread(target=bridge_loop, args=(state, args), daemon=True)
-    cam_thread = threading.Thread(target=cam.run, daemon=True)
 
     bridge_thread.start()
-    cam_thread.start()
     
     time.sleep(0.5)
-    app = create_app(state, cam, gpio, args)
+    app = create_app(state, gpio, args)
 
     try:
         app.run(host=args.web_host, port=args.web_port, debug=False, threaded=True, use_reloader=False)

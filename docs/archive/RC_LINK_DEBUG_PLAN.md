@@ -4,7 +4,6 @@
 - ✓ RC remote connected to **LAPTOP** via CP2102 TTL converter
 - ✓ Laptop & Raspberry Pi connected via **Ethernet** (192.168.50.2)
 - ✗ Dashboard shows RC link as "LOST" or not updating
-- ✗ Camera feed may not be showing
 
 ---
 
@@ -205,7 +204,6 @@ python3 pi_rover_system.py \
   --baud 115200 \
   --failsafe-timeout 1.0 \
   --eth-interface eth0 \
-  --camera-index 0 \
   --web-host 0.0.0.0 \
   --web-port 8080
 EOF
@@ -250,7 +248,6 @@ python3 /home/akhil/Documents/sys/pc_rc_sender.py \
 | test_udp.py receives packets but dashboard doesn't | Dashboard crashed or restarted | Restart: `pkill -f pi_rover_system` ← `python3 pi_rover_system.py` |
 | test_udp.py gets NO packets | Firewall or wrong sender IP | Disable UFW or verify `--pi-ip 192.168.50.2` |
 | Dashboard page won't load | Flask crashed on startup | Check startup terminal for errors, check port 8080 is free |
-| Camera shows error | Camera not connected or not enabled | `ls -la /dev/video0` |
 
 ---
 

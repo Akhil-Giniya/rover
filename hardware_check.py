@@ -10,11 +10,6 @@ try:
 except Exception:
     serial = None
 
-try:
-    import cv2
-except Exception:
-    cv2 = None
-
 
 def ok(msg):
     print(f"[OK] {msg}")
@@ -83,23 +78,6 @@ def check_uart(uart_port, baud):
         return False
 
 
-def check_camera(index):
-    if cv2 is None:
-        warn("opencv-python not installed; skipping camera check")
-        return False
-    cap = cv2.VideoCapture(index)
-    if not cap.isOpened():
-        warn(f"Camera index {index} not available")
-        return False
-    ok_ret, _ = cap.read()
-    cap.release()
-    if ok_ret:
-        ok(f"Camera index {index} read successful")
-        return True
-    warn(f"Camera index {index} opened but frame read failed")
-    return False
-
-
 def check_udp_bind(port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -118,7 +96,6 @@ def main():
     parser.add_argument("--eth-interface", default="eth0")
     parser.add_argument("--uart-port", default="/dev/serial0")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--udp-port", type=int, default=5000)
     args = parser.parse_args()
 
@@ -126,13 +103,11 @@ def main():
     eth_ok = check_eth(args.eth_interface)
     check_no_wifi_bluetooth()
     uart_ok = check_uart(args.uart_port, args.baud)
-    cam_ok = check_camera(args.camera_index)
     udp_ok = check_udp_bind(args.udp_port)
 
     print("=== Summary ===")
     print(f"Ethernet: {'OK' if eth_ok else 'NOT OK'}")
     print(f"UART: {'OK' if uart_ok else 'NOT OK'}")
-    print(f"Camera: {'OK' if cam_ok else 'NOT OK'}")
     print(f"UDP Port: {'OK' if udp_ok else 'NOT OK'}")
 
     if not (eth_ok and uart_ok and udp_ok):

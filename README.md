@@ -1,6 +1,6 @@
 # Underwater Rover Control System - Complete Setup Guide
 
-Professional-grade Raspberry Pi native control system for underwater rovers. Features Ethernet-only communication (no Wi-Fi), real-time dashboard with live camera feed, and robust failsafe timeout protection.
+Professional-grade Raspberry Pi native control system for underwater rovers. Features Ethernet-only communication (no Wi-Fi), real-time dashboard telemetry/logging, and robust failsafe timeout protection.
 
 ## Documentation Layout
 
@@ -26,7 +26,6 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 │                                                              │
 │  UDP:5000 ─[pi_rover_system.py]→                            │
 │    • Bridge Loop (receive RC, forward to ESP32)              │
-│    • Camera Thread (MJPEG streaming)                         │
 │    • Flask Dashboard (0.0.0.0:8080)                          │
 │                                                              │
 │  /dev/serial0 (GPIO14 TX / GPIO15 RX) ──[UART 115200]→ ESP32│
@@ -44,7 +43,7 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 │  Serial2 (RX GPIO16 / TX GPIO17) ──→ Parse RC Commands     │
 │                                                              │
 │  Thruster Control (ESC PWM) ──→ Motors                      │
-│  Servo Control (SG90) ──→ Camera Pan/Tilt                   │
+│  Servo Control (SG90) ──→ Aux Servo Outputs                 │
 │  Light Control (Relay) ──→ Lights                           │
 │                                                              │
 │  Status Messages ──→ Back to Pi (logged on dashboard)        │
@@ -61,7 +60,6 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 | Flysky FS-i6 Remote | 1 | TX + RX module | $30-50 |
 | USB-Micro Cable | 1 | For CP2102 | $2 |
 | Ethernet Cable | 1 | RJ45 Cat5e/6 | $3 |
-| Raspberry Pi Camera | 1 | v2 (8MP) recommended | $15-25 |
 | 3.3V UART Level Shifter | 1 | Optional if ESP32 5V intolerant | $1 |
 | Motor ESCs BLHeli | 2+ | 30A underwater rated | $20-40 |
 | Brushless Motors | 2+ | T200 or similar thruster | $40-80 |
@@ -128,7 +126,6 @@ In your browser: **http://192.168.50.2:8080**
 Expected to see:
 - "RC link: LOST" (yellow/red) until PC sender starts
 - Empty logs
-- Black camera frame (until ESP32 connected)
 
 ### 6. Flash ESP32 Firmware
 
@@ -389,45 +386,6 @@ python3 pi_rover_system.py --eth-interface wlan0
    }
    ```
 
-### Camera shows "NOT AVAILABLE" but rpicam-vid works manually
-
-**Symptoms:** Dashboard loads, other features work, but camera stream is black
-
-**Diagnosis:**
-
-1. **Check camera is connected:**
-   ```bash
-   ssh pi@192.168.50.2
-   
-   # Raspberry Pi camera detection
-   vcgencmd get_camera
-   # Should output: supported=1 detected=1
-   ```
-
-2. **Test rpicam-vid manually:**
-   ```bash
-   rpicam-vid --codec mjpeg --width 640 --height 480 --timeout 3 --output test.mjpeg
-   # If works: file test.mjpeg should be 1-10 MB (3 sec video)
-   ```
-
-3. **Check file permissions:**
-   ```bash
-   ls -la /dev/video*
-   groups pi
-   # User 'pi' should be in 'video' group
-   
-   # If not:
-   sudo usermod -aG video pi
-   sudo reboot
-   ```
-
-4. **Reduce resolution if streaming lags:**
-   ```bash
-   # Edit pi_rover_system.py, CameraSource.start_pipeline():
-   # Change --width 640 --height 480
-   # To --width 320 --height 240
-   ```
-
 ### Serial Port Permission Denied: /dev/ttyUSB0
 
 **Symptoms:** `PermissionError: [Errno 13] Could not open port /dev/ttyUSB0`
@@ -465,7 +423,6 @@ python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 ...
 | UART Baud Rate | 115200 | ~11.5 KBps max throughput |
 | Dashboard Latency | <100ms | RC to display update |
 | Failsafe Timeout | 1.0s (configurable) | Triggers NO_SIGNAL |
-| Camera FPS | ~20-30 fps | MJPEG at 640×480 |
 | CPU Usage | 15-25% | Both bridge + dashboard threads |
 | Memory Usage | ~80-120 MB | Mostly Python + Flask |
 
@@ -514,9 +471,9 @@ void handlePacket(const String &packet) {
 | `pi_rover_system.py` | Core Pi service (UDP bridge, UART forwarder, Flask web) | Python 3.9+ |
 | `pc_rc_sender.py` | Laptop RC encoder (Flysky iBUS → UDP) | Python 3.9+ |
 | `esp32_receiver.ino` | ESP32 firmware (UART RX, failsafe, thruster control) | C++ / Arduino |
-| `hardware_check.py` | System diagnostics (Ethernet, UART, camera, UDP) | Python 3.9+ |
+| `hardware_check.py` | System diagnostics (Ethernet, UART, UDP) | Python 3.9+ |
 | `ethernet_only_setup.sh` | Disable Wi-Fi/Bluetooth on Pi | Bash |
-| `requirements.txt` | Python package dependencies (Flask, pyserial, opencv) | pip |
+| `requirements.txt` | Python package dependencies (Flask, pyserial) | pip |
 | `README.md` | This file | Markdown |
 
 ## Support & Common Issues
@@ -548,7 +505,7 @@ sudo kill <PID>
 4. ✅ **Complete**: Run RC sender from laptop
 5. ⏭️ **TODO**: Implement thruster ESC control in esp32_receiver.ino
 6. ⏭️ **TODO**: Calibrate motor speed curves
-7. ⏭️ **TODO**: Integrate servo control for camera pan/tilt
+7. ⏭️ **TODO**: Add more dashboard telemetry widgets
 8. ⏭️ **TODO**: Add light control relay support
 
 ## License

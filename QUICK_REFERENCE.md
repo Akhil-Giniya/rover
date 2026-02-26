@@ -6,7 +6,6 @@
 Dashboard:   http://192.168.50.2:8080
 Status API:  http://192.168.50.2:8080/api/status
 Logs API:    http://192.168.50.2:8080/api/logs
-Video Feed:  http://192.168.50.2:8080/video_feed
 ```
 
 ## 📡 Connection Info
@@ -34,7 +33,6 @@ python3 pc_rc_sender.py \
 - **Last RC:** Current channel values
 - **Packets RX/TX:** Count of transmitted packets
 - **Logs:** Real-time system + RC + ESP32 messages
-- **Camera:** Live feed (if connected)
 
 ## ⚙️ Control System
 

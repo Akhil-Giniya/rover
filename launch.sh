@@ -24,6 +24,7 @@ PI_HOST="192.168.50.2"
 PI_PASS="123456"
 PI_PORT_UDP=5000
 PI_PORT_WEB=8080
+PI_PORT_VIDEO=8090
 PI_ROVER_DIR="/home/pi04b/rover"
 UART_PORT="/dev/serial0"
 BAUD=115200
@@ -102,6 +103,7 @@ echo -e "${NC}"
 info "Pi target  : ${PI_USER}@${PI_HOST}"
 info "UDP port   : ${PI_PORT_UDP}"
 info "Dashboard  : http://${PI_HOST}:${PI_PORT_WEB}"
+info "Camera     : http://${PI_HOST}:${PI_PORT_VIDEO}"
 echo ""
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -149,6 +151,7 @@ pi_run "mkdir -p ${PI_ROVER_DIR}"
 # Files that need to run on the Pi
 FILES_TO_SYNC=(
   "pi_rover_system.py"
+  "pi_web_video_stream.py"
   "hardware_check.py"
   "requirements.txt"
 )
@@ -239,8 +242,31 @@ for i in {1..15}; do
 done
 
 # ════════════════════════════════════════════════════════════════════════════
-# STEP 6 — Start PC RC sender (local, reads Flysky iBUS → UDP to Pi)
+# STEP 5b — Start pi_web_video_stream.py on Pi
 # ════════════════════════════════════════════════════════════════════════════
+step "Step 5b — Starting camera video stream on Pi"
+
+# Kill any old instance first
+pi_run "pkill -f pi_web_video_stream.py 2>/dev/null; true"
+
+VIDEO_CMD="cd ${PI_ROVER_DIR} && nohup python3 pi_web_video_stream.py --port ${PI_PORT_VIDEO} > /tmp/video_stream.log 2>&1 </dev/null & echo \$!"
+VIDEO_PID="$(pi_run "${VIDEO_CMD}" | tr -dc '0-9')"
+
+if [[ -n "${VIDEO_PID}" ]]; then
+  sleep 2
+  if pi_run "kill -0 ${VIDEO_PID} 2>/dev/null"; then
+    ok "Camera stream started (PID: ${VIDEO_PID})"
+    info "Stream URL : http://${PI_HOST}:${PI_PORT_VIDEO}"
+    info "Stream logs: ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/video_stream.log'"
+  else
+    warn "Camera stream exited early. Check: ssh ${PI_USER}@${PI_HOST} 'cat /tmp/video_stream.log'"
+    VIDEO_PID=""
+  fi
+else
+  warn "Camera stream did not return a PID — continuing without video."
+fi
+
+
 step "Step 6 — Starting PC RC sender (Flysky → UDP → Pi)"
 
 # Auto-detect serial port
@@ -303,8 +329,9 @@ echo -e "${BOLD}  ╔═══════════════════�
 echo -e "${GREEN}  ║  ✓  ALL SYSTEMS GO                                  ║${NC}"
 echo -e "${BOLD}  ╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "  ║  Dashboard : ${CYAN}${DASH_URL}${NC}"
+echo -e "  ║  Camera    : ${CYAN}http://${PI_HOST}:${PI_PORT_VIDEO}${NC}"
 echo -e "  ║  Pi logs   : ${CYAN}ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/rover.log'${NC}"
-echo -e "  ║  Ctrl+C    : stops RC sender + Pi rover process"
+echo -e "  ║  Ctrl+C    : stops RC sender + Pi rover + camera"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -319,6 +346,8 @@ cleanup() {
   echo ""
   step "Shutting down..."
   [[ -n "${RC_PID}" ]] && kill "${RC_PID}" 2>/dev/null && ok "RC sender stopped"
+  pi_run "pkill -f pi_web_video_stream.py 2>/dev/null || true"
+  ok "Camera stream stopped"
   pi_run "pkill -f pi_rover_system.py 2>/dev/null || true"
   ok "Pi rover system stopped"
   ok "Bye!"
