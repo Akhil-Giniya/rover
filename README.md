@@ -68,11 +68,30 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 
 ## Quick Start (5 Minutes)
 
+### 0. New Environment Setup (first time on any OS)
+
+```bash
+# Clone the repo (if you haven't already)
+git clone https://github.com/Akhil-Giniya/rover.git
+cd rover
+
+# Install all Python dependencies (works on Windows and Linux)
+pip install -r requirements.txt
+
+# Or install as a proper package (enables `pc-rc-sender` and `hardware-check` commands):
+pip install -e .
+```
+
+> **Python 3.9 or later** is required. Download from https://www.python.org/downloads/
+
 ### 1. Copy Files to Raspberry Pi
 
 ```bash
-# On your laptop, assuming files are in ~/sys/
-scp -r ~/sys/* pi@192.168.50.2:/home/pi/sys/
+# Linux/Mac
+scp -r . pi@192.168.50.2:/home/pi/rover/
+
+# Windows (PowerShell) – requires OpenSSH (built into Windows 10/11)
+scp -r . pi@192.168.50.2:/home/pi/rover/
 ```
 
 ### 2. Enable UART on Pi (One-time Setup)
@@ -86,11 +105,11 @@ sudo raspi-config
 # → Reboot
 ```
 
-### 3. Install Python Dependencies
+### 3. Install Python Dependencies (on Pi)
 
 ```bash
 ssh pi@192.168.50.2
-cd ~/sys
+cd ~/rover
 python3 -m pip install -r requirements.txt
 ```
 
@@ -98,7 +117,7 @@ python3 -m pip install -r requirements.txt
 
 ```bash
 ssh pi@192.168.50.2
-cd ~/sys
+cd ~/rover
 python3 pi_rover_system.py \
   --listen-ip 0.0.0.0 --listen-port 5000 \
   --uart-port /dev/serial0 --baud 115200
@@ -144,7 +163,7 @@ Before uploading, install these libraries via **Tools → Manage Libraries** in 
 
 # Open esp32_receiver.ino in Arduino IDE
 # Tools → Board → "ESP32 Dev Module"
-# Tools → Port → "/dev/ttyUSB0" (your ESP32 COM port)
+# Tools → Port → "/dev/ttyUSB0" (Linux) or "COM3" (Windows)
 # Sketch → Upload (Ctrl+U)
 
 # Expected serial output (115200 baud):
@@ -155,19 +174,30 @@ Before uploading, install these libraries via **Tools → Manage Libraries** in 
 
 ### 7. Start PC RC Sender (on Laptop)
 
+**Linux / Mac:**
 ```bash
-# Linux/Mac
 python3 pc_rc_sender.py \
   --serial-port /dev/ttyUSB0 \
   --pi-ip 192.168.50.2 \
   --pi-port 5000
-
-# Windows (COM3 example)
-python3 pc_rc_sender.py ^
-  --serial-port COM3 ^
-  --pi-ip 192.168.50.2 ^
-  --pi-port 5000
 ```
+
+**Windows (Command Prompt) – one-click launcher:**
+```cmd
+launch.bat
+```
+Or with explicit port:
+```cmd
+launch.bat COM3
+```
+
+**Windows (Command Prompt) – manual:**
+```cmd
+python pc_rc_sender.py --serial-port COM3 --pi-ip 192.168.50.2 --pi-port 5000
+```
+
+> **Tip:** `pc_rc_sender.py` auto-detects the CP2102 adapter on both Windows and Linux.
+> If multiple serial devices are connected, pass `--serial-port` explicitly.
 
 Expected output:
 ```
@@ -413,6 +443,39 @@ python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 ...
 # Resets after reboot
 ```
 
+### Windows: Serial Port Not Found
+
+**Symptoms:** `[FAIL] Serial device not found: COM3`
+
+1. **Install CP2102 driver** from Silicon Labs:
+   https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers
+
+2. **Find the correct COM port** in Device Manager → Ports (COM & LPT):
+   - Right-click Start → Device Manager → Ports (COM & LPT)
+   - Note the COM number shown for "Silicon Labs CP210x" (e.g. COM5)
+
+3. **Pass the port explicitly:**
+   ```cmd
+   python pc_rc_sender.py --serial-port COM5 --pi-ip 192.168.50.2 --pi-port 5000
+   ```
+   Or just run `launch.bat COM5`.
+
+### Windows: Python Not Found
+
+Install Python 3.9+ from https://www.python.org/downloads/.
+During installation tick **"Add Python to PATH"**.
+
+Verify:
+```cmd
+python --version
+pip --version
+```
+
+Then install dependencies:
+```cmd
+pip install -r requirements.txt
+```
+
 ## Performance Metrics
 
 **Expected performance on Raspberry Pi 4B:**
@@ -466,15 +529,18 @@ void handlePacket(const String &packet) {
 
 ## File Reference
 
-| File | Purpose | Language |
+| File | Purpose | Platform |
 |------|---------|----------|
-| `pi_rover_system.py` | Core Pi service (UDP bridge, UART forwarder, Flask web) | Python 3.9+ |
-| `pc_rc_sender.py` | Laptop RC encoder (Flysky iBUS → UDP) | Python 3.9+ |
-| `esp32_receiver.ino` | ESP32 firmware (UART RX, failsafe, thruster control) | C++ / Arduino |
-| `hardware_check.py` | System diagnostics (Ethernet, UART, UDP) | Python 3.9+ |
-| `ethernet_only_setup.sh` | Disable Wi-Fi/Bluetooth on Pi | Bash |
-| `requirements.txt` | Python package dependencies (Flask, pyserial) | pip |
-| `README.md` | This file | Markdown |
+| `pi_rover_system.py` | Core Pi service (UDP bridge, UART forwarder, Flask web) | Pi (Linux) |
+| `pc_rc_sender.py` | Laptop RC encoder (Flysky iBUS → UDP) | Windows & Linux |
+| `esp32_receiver.ino` | ESP32 firmware (UART RX, failsafe, thruster control) | ESP32 (Arduino) |
+| `hardware_check.py` | System diagnostics (Ethernet, UART, UDP) | Windows & Linux |
+| `launch.sh` | One-click launcher for Linux/Mac | Linux / Mac |
+| `launch.bat` | One-click RC sender launcher for Windows | Windows |
+| `ethernet_only_setup.sh` | Disable Wi-Fi/Bluetooth on Pi | Pi (Linux) |
+| `requirements.txt` | Python package dependencies (Flask, pyserial, opencv) | All |
+| `pyproject.toml` | Package metadata – enables `pip install -e .` | All |
+| `README.md` | This file | — |
 
 ## Support & Common Issues
 
