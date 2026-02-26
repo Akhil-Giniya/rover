@@ -7,8 +7,13 @@ import sys
 
 try:
     import serial
+    from serial.tools import list_ports as _list_ports
 except Exception:
     serial = None
+    _list_ports = None
+
+# Default UART port varies by platform
+_DEFAULT_UART = "COM3" if sys.platform == "win32" else "/dev/serial0"
 
 
 def ok(msg):
@@ -27,19 +32,49 @@ def run_cmd(cmd):
     return subprocess.run(cmd, check=False, capture_output=True, text=True)
 
 
+def _uart_port_exists(port: str) -> bool:
+    """Check if a UART/serial port exists (cross-platform)."""
+    if sys.platform == "win32":
+        if _list_ports is None:
+            return False
+        return port in {p.device for p in _list_ports.comports()}
+    return os.path.exists(port)
+
+
 def check_eth(interface):
-    r = run_cmd(["ip", "-brief", "link", "show", interface])
-    if r.returncode != 0:
-        fail(f"Ethernet interface {interface} missing")
+    if sys.platform == "win32":
+        # On Windows use 'netsh' to query interface status
+        r = run_cmd(["netsh", "interface", "show", "interface", interface])
+        if r.returncode != 0 or not r.stdout.strip():
+            fail(f"Ethernet interface '{interface}' not found (check name in ipconfig)")
+            return False
+        if "connected" in r.stdout.lower():
+            ok(f"Ethernet {interface} is Connected")
+            return True
+        warn(f"Ethernet {interface} exists but may not be Connected")
         return False
-    if " UP " in f" {r.stdout.strip()} ":
-        ok(f"Ethernet {interface} is UP")
-        return True
-    warn(f"Ethernet {interface} exists but is DOWN")
-    return False
+    else:
+        r = run_cmd(["ip", "-brief", "link", "show", interface])
+        if r.returncode != 0:
+            fail(f"Ethernet interface {interface} missing")
+            return False
+        if " UP " in f" {r.stdout.strip()} ":
+            ok(f"Ethernet {interface} is UP")
+            return True
+        warn(f"Ethernet {interface} exists but is DOWN")
+        return False
 
 
 def check_no_wifi_bluetooth():
+    if sys.platform == "win32":
+        # On Windows, check Wi-Fi adapter status via netsh
+        r = run_cmd(["netsh", "wlan", "show", "interfaces"])
+        if r.returncode != 0 or "There is no wireless interface" in r.stdout:
+            ok("Wi-Fi appears disabled or not present")
+        else:
+            warn("Wi-Fi may still be enabled; disable via Windows Settings if needed")
+        return
+    # Linux path using rfkill
     try:
         rf = run_cmd(["rfkill", "list"])
         if rf.returncode != 0:
@@ -62,8 +97,10 @@ def check_no_wifi_bluetooth():
 
 
 def check_uart(uart_port, baud):
-    if not os.path.exists(uart_port):
+    if not _uart_port_exists(uart_port):
         fail(f"UART device {uart_port} not found")
+        if sys.platform == "win32":
+            fail("  Check Device Manager → Ports for the correct COM port number")
         return False
     if serial is None:
         warn("pyserial not installed; skipping UART open test")
@@ -92,9 +129,13 @@ def check_udp_bind(port):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Physical/system check for Pi rover stack")
-    parser.add_argument("--eth-interface", default="eth0")
-    parser.add_argument("--uart-port", default="/dev/serial0")
+    parser = argparse.ArgumentParser(
+        description="Physical/system check for rover stack (Windows & Linux)"
+    )
+    parser.add_argument("--eth-interface", default="eth0",
+                        help="Ethernet interface name (default: eth0; Windows: e.g. 'Ethernet')")
+    parser.add_argument("--uart-port", default=_DEFAULT_UART,
+                        help=f"UART/serial port (default: {_DEFAULT_UART})")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--udp-port", type=int, default=5000)
     args = parser.parse_args()

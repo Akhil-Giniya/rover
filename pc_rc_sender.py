@@ -20,7 +20,6 @@ Data Flow:
     → Dashboard + UART → ESP32
 """
 import argparse
-import glob
 import os
 import socket
 import struct
@@ -28,6 +27,7 @@ import sys
 import time
 
 import serial
+from serial.tools import list_ports
 
 # iBUS Protocol Constants (Flysky Remote)
 IBUS_FRAME_LEN = 32        # Each iBUS frame is 32 bytes
@@ -38,17 +38,37 @@ def auto_detect_serial() -> str:
     """
     Auto-detect CP2102 / CH340 USB serial adapters.
 
-    Scans common Linux serial port patterns and returns the first match.
+    Uses serial.tools.list_ports for cross-platform support (Windows, Linux, and macOS).
+    On Windows returns COM ports (e.g. COM3); on Linux/macOS returns /dev/ttyUSB0, etc.
     Prints a warning if multiple candidates exist (user should specify --serial-port).
 
     Returns:
-        str: Device path (e.g. /dev/ttyUSB0) or empty string if none found
+        str: Port name (e.g. COM3 or /dev/ttyUSB0) or empty string if none found
     """
-    candidates = sorted(
-        glob.glob("/dev/ttyUSB*") +
-        glob.glob("/dev/ttyACM*") +
-        glob.glob("/dev/ttyS[1-9]*")           # Skip ttyS0 (often the console)
-    )
+    all_ports = list_ports.comports()
+
+    if sys.platform == "win32":
+        # On Windows all COM ports are valid candidates
+        candidates = sorted(p.device for p in all_ports)
+    else:
+        # On Linux/Mac prefer USB serial adapters (CP2102, CH340, etc.)
+        usb_ports = [
+            p for p in all_ports
+            if any(tag in p.device for tag in ("/dev/ttyUSB", "/dev/ttyACM"))
+        ]
+        if usb_ports:
+            candidates = sorted(p.device for p in usb_ports)
+        else:
+            # Fall back to any port that is not a hardware UART (ttyS*) or the
+            # Pi's GPIO serial port – those are never a Flysky USB adapter
+            candidates = sorted(
+                p.device for p in all_ports
+                if not any(
+                    p.device.startswith(skip)
+                    for skip in ("/dev/ttyS", "/dev/serial")
+                )
+            )
+
     if not candidates:
         return ""
     if len(candidates) > 1:
@@ -57,6 +77,26 @@ def auto_detect_serial() -> str:
     else:
         print(f"[INFO] Auto-detected serial port: {candidates[0]}")
     return candidates[0]
+
+
+def serial_port_exists(port: str) -> bool:
+    """
+    Check whether a serial port is present on the system.
+
+    On Windows, COM ports are not filesystem paths and os.path.exists() does
+    not work reliably; instead we query the serial port list.  On Linux/Mac
+    the device node is a real path so os.path.exists() is sufficient.
+
+    Args:
+        port: Port name, e.g. 'COM3' or '/dev/ttyUSB0'
+
+    Returns:
+        bool: True if the port appears to be available
+    """
+    if sys.platform == "win32":
+        available = {p.device for p in list_ports.comports()}
+        return port in available
+    return os.path.exists(port)
 
 
 def parse_ibus_frame(frame: bytes):
@@ -180,9 +220,12 @@ def main():
         sys.exit(1)
 
     # Validate port exists before starting loop
-    if not os.path.exists(serial_port):
-        print(f"[FAIL] Serial device does not exist: {serial_port}")
-        print("       Check USB connection and driver (lsusb, dmesg | tail -20)")
+    if not serial_port_exists(serial_port):
+        print(f"[FAIL] Serial device not found: {serial_port}")
+        if sys.platform == "win32":
+            print("       Check USB connection and driver (Device Manager → Ports)")
+        else:
+            print("       Check USB connection and driver (lsusb, dmesg | tail -20)")
         sys.exit(1)
 
     # Calculate send interval (1/Hz)
