@@ -836,40 +836,50 @@ class CameraSource:
             return False
 
     def run(self):
+        buf = b''
         while self.running:
             if self.process is None or self.process.poll() is not None:
+                buf = b''
                 if not self.start_pipeline():
                     time.sleep(2.0)
                     continue
 
             try:
-                byte1 = self.process.stdout.read(1)
-                byte2 = self.process.stdout.read(1)
-                while byte1 != b'\xff' or byte2 != b'\xd8':
-                    byte1 = byte2
-                    byte2 = self.process.stdout.read(1)
-                    if not byte2: break
-                if not byte2: continue
-                
-                jpeg_data = bytearray(b'\xff\xd8')
-                byte1 = self.process.stdout.read(1)
-                byte2 = self.process.stdout.read(1)
-                jpeg_data += byte1 + byte2
-                
-                while byte1 != b'\xff' or byte2 != b'\xd9':
-                    byte1 = byte2
-                    byte2 = self.process.stdout.read(1)
-                    if not byte2: break
-                    jpeg_data += byte2
-                    
-                if byte2:
-                    with self.lock:
-                        self.latest_jpeg = bytes(jpeg_data)
-                    with self.state.lock:
-                        self.state.camera_ok = True
-                else:
+                # Read in chunks for much better throughput than byte-by-byte
+                chunk = self.process.stdout.read1(65536)
+                if not chunk:
                     with self.state.lock:
                         self.state.camera_ok = False
+                    self.process = None
+                    continue
+
+                buf += chunk
+
+                # Extract all complete JPEG frames (SOI→EOI); keep the latest
+                latest = None
+                while True:
+                    soi = buf.find(b'\xff\xd8')
+                    if soi == -1:
+                        buf = b''
+                        break
+                    eoi = buf.find(b'\xff\xd9', soi + 2)
+                    if eoi == -1:
+                        buf = buf[soi:]  # keep partial frame for next read
+                        break
+                    eoi += 2  # include the EOI marker bytes
+                    latest = buf[soi:eoi]
+                    buf = buf[eoi:]
+
+                if latest is not None:
+                    with self.lock:
+                        self.latest_jpeg = latest
+                    with self.state.lock:
+                        self.state.camera_ok = True
+
+                # Prevent unbounded buffer growth
+                if len(buf) > 5 * 1024 * 1024:
+                    buf = b''
+
             except Exception:
                 with self.state.lock:
                     self.state.camera_ok = False
