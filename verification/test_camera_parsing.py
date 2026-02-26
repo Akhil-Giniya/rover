@@ -15,13 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Minimal mock of SharedState for testing
 class MockLock:
     def __enter__(self): return self
-    def __exit__(self, *a): pass
+    def __exit__(self, *exc_info): pass
 
 class MockState:
     def __init__(self):
         self.lock = MockLock()
         self.camera_ok = False
-    def add_log(self, *a): pass
+    def add_log(self, *args): pass
 
 
 def make_jpeg(payload: bytes) -> bytes:
