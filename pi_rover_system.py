@@ -172,7 +172,7 @@ DASHBOARD_HTML = """
     <div class="brand">
       <div class="brand-icon">&#x1F916;</div>
       <div>
-        <div class="brand-name">ROVER COMMAND CENTER</div>
+        <div class="brand-name">BlackFin COMMAND CENTER</div>
         <div class="brand-sub">Underwater Systems Interface &#xB7; v2.0</div>
       </div>
     </div>
@@ -200,11 +200,11 @@ DASHBOARD_HTML = """
     <div class="card" style="flex:1">
       <div class="stitle">Hardware Control</div>
       <div class="cgrp">
-        <div class="clbl"><span>SERVO 1</span><span id="val-s1" class="cval">90&deg;</span></div>
+        <div class="clbl"><span>SERVO 1 (GPIO 12)</span><span id="val-s1" class="cval">90&deg;</span></div>
         <input type="range" min="0" max="180" value="90" oninput="updateServo(1,this.value)">
       </div>
       <div class="cgrp">
-        <div class="clbl"><span>SERVO 2</span><span id="val-s2" class="cval">90&deg;</span></div>
+        <div class="clbl"><span>SERVO 2 (GPIO 13)</span><span id="val-s2" class="cval">90&deg;</span></div>
         <input type="range" min="0" max="180" value="90" oninput="updateServo(2,this.value)">
       </div>
       <div class="rpanel">
@@ -532,7 +532,7 @@ class GpioController:
     def _update_loop(self):
         """
         Manages the state of the relay pin based on priority:
-        1. Momentary Button (Overrides everything -> HIGH)
+        1. Momentary Button (Overrides everything -> HIGH) 
         2. Blink Toggle (Toggles High/Low)
         3. Default (LOW)
         """
@@ -623,11 +623,12 @@ def bridge_loop(state: SharedState, args):
                     last_rx_time = now
 
                     sender = f"{addr[0]}:{addr[1]}"
-                    
+
                     with state.lock:
                         state.last_rc_time = now
                         state.last_rc_sender = sender
                         state.packets_rx += 1
+                        pkt_count = state.packets_rx  # read count safely inside lock
 
                     # Forward raw 32-byte binary iBUS frame directly to ESP32.
                     # IBusBM on the ESP32 expects binary iBUS protocol, not ASCII text.
@@ -637,11 +638,12 @@ def bridge_loop(state: SharedState, args):
                             with state.lock:
                                 state.packets_uart_tx += 1
 
-                    if state.packets_rx % 50 == 0:
-                        state.add_log("RC", "Relayed 50 iBUS frames to ESP32")
-                    if state.packets_rx == 1:
+                    # Use lock-safe local copy for log rate checks
+                    if pkt_count == 1:
                         print(f"✓ First raw iBUS packet received from {addr[0]}")
                         state.add_log("RC", f"First UDP frame from {sender}")
+                    elif pkt_count % 50 == 0:
+                        state.add_log("RC", f"Relayed {pkt_count} iBUS frames to ESP32")
             except Exception as e:
                 state.add_log("PI", f"UDP receive error: {e}")
 
@@ -682,18 +684,18 @@ def create_app(state: SharedState, gpio: GpioController, args):
 
     @app.get("/")
     def dashboard():
-        video_url = f"http://{args.listen_ip if args.listen_ip != '0.0.0.0' else '192.168.50.2'}:8090/video_feed"
+        # Dynamically determine the host for the video feed based on how the dashboard was accessed
+        host = request.host.split(':')[0]
+        video_url = f"http://{host}:8090/video_feed"
         return render_template_string(DASHBOARD_HTML, video_url=video_url)
 
 
     @app.get("/api/status")
     def api_status():
+        # Snapshot shared state under lock, then do I/O outside
         with state.lock:
-            last_age = (time.monotonic() - state.last_rc_time) if state.last_rc_time > 0 else 9999.0
-            payload = {
-                "ethernet_up": check_ethernet_up(args.eth_interface),
-                "link_alive": last_age < 1.0,
-                "last_rc_age_sec": round(last_age, 3),
+            last_rc_time = state.last_rc_time
+            snap = {
                 "packets_rx": state.packets_rx,
                 "packets_uart_tx": state.packets_uart_tx,
                 "uart_rx_lines": state.uart_rx_lines,
@@ -702,7 +704,13 @@ def create_app(state: SharedState, gpio: GpioController, args):
                 "blink_active": state.blink_active,
                 "relay_state": state.relay_state,
             }
-        return jsonify(payload)
+        last_age = (time.monotonic() - last_rc_time) if last_rc_time > 0 else 9999.0
+        # Use 2.0 s threshold: gives headroom for the 500 ms JS poll interval
+        # and any network/OS scheduling jitter without false "SIGNAL LOST" flicker.
+        snap["link_alive"] = last_age < 2.0
+        snap["last_rc_age_sec"] = round(last_age, 3)
+        snap["ethernet_up"] = check_ethernet_up(args.eth_interface)
+        return jsonify(snap)
 
     @app.get("/api/logs")
     def api_logs():

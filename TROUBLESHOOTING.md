@@ -12,7 +12,7 @@ This guide helps you diagnose where the RC data is getting lost.
 
 On **PC**:
 ```bash
-ping 192.168.50.2
+ping <PI_IP>
 # Should see responses
 ```
 
@@ -40,7 +40,7 @@ python3 pc_rc_sender.py \
 
 **If NO packets**:
 - Make sure PC sender is running (no errors)
-- Check that `--pi-ip` in sender is `192.168.50.2` (correct)
+- Check that `--pi-ip` in sender is `<PI_IP>` (correct)
 - Check firewall on Pi: `sudo ufw status` (should be inactive or have port 5000 allowed)
 
 ---
@@ -78,8 +78,8 @@ UNDERWATER ROVER SYSTEM - STARTING
    UDP Listen:   0.0.0.0:5000
    Web Dashboard: 0.0.0.0:8080
    Ethernet IF:  eth0
-   → IP Address: 192.168.50.2
-   → Access Dashboard: http://192.168.50.2:8080
+   → IP Address: <PI_IP>
+   → Access Dashboard: http://<PI_IP>:8080
 
 ✓ UDP bound to 0.0.0.0:5000
 ✓ UART device: /dev/serial0
@@ -99,7 +99,7 @@ sleep 1
 
 From **PC**, open browser:
 ```
-http://192.168.50.2:8080
+http://<PI_IP>:8080
 ```
 
 You should see the rover dashboard with:
@@ -116,7 +116,7 @@ Once pi_rover_system is running and dashboard is open:
 
 1. **From PC**, start RC sender again:
 ```bash
-python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip 192.168.50.2 --pi-port 5000
+python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip <PI_IP> --pi-port 5000
 ```
 
 2. **In dashboard**, watch the **Logs** section (bottom right)
@@ -151,7 +151,7 @@ On **PC**, run sender with verbose output:
 python3 pc_rc_sender.py \
   --serial-port /dev/ttyUSB0 \
   --print-every 1 \
-  --pi-ip 192.168.50.2 \
+  --pi-ip <PI_IP> \
   --pi-port 5000
 ```
 
@@ -174,10 +174,10 @@ cat /dev/ttyUSB0
 ## Quick Checklist
 
 - [ ] PC and Pi are on same Ethernet network
-- [ ] `ping 192.168.50.2` works
+- [ ] `ping <PI_IP>` works
 - [ ] `test_udp.py` receives packets when PC sender runs
 - [ ] `pi_rover_system.py` is running (check `ps aux`)
-- [ ] Dashboard accessible at `http://192.168.50.2:8080`
+- [ ] Dashboard accessible at `http://<PI_IP>:8080`
 - [ ] Dashboard logs show "RC:" messages when PC sender running
 - [ ] Firefox/Chrome shows live update in dashboard
 

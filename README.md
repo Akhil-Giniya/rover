@@ -22,7 +22,7 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
                          Ethernet Cable (RJ45)         │
                                                        ↓
 ┌──────────────────────────────────────────────────────────────┐
-│ Raspberry Pi 4B (192.168.50.2)                              │
+│ Raspberry Pi 4B (<PI_IP>)                              │
 │                                                              │
 │  UDP:5000 ─[pi_rover_system.py]→                            │
 │    • Bridge Loop (receive RC, forward to ESP32)              │
@@ -32,7 +32,7 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 │                                                              │
 │  ← UART Response (logs, status) ←                           │
 │                                                              │
-│  http://192.168.50.2:8080 ← Access Web Dashboard           │
+│  http://<PI_IP>:8080 ← Access Web Dashboard           │
 └──────────────────────────────────────────────────────────────┘
                                     ↓
                          GPIO14 (TX) / GPIO15 (RX)
@@ -72,13 +72,13 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 
 ```bash
 # On your laptop, assuming files are in ~/sys/
-scp -r ~/sys/* pi@192.168.50.2:/home/pi/sys/
+scp -r ~/sys/* pi@<PI_IP>:/home/pi/sys/
 ```
 
 ### 2. Enable UART on Pi (One-time Setup)
 
 ```bash
-ssh pi@192.168.50.2
+ssh pi@<PI_IP>
 sudo raspi-config
 # → Interface Options → Serial Port
 # → "Would you like a login shell accessible over serial?" → NO
@@ -89,7 +89,7 @@ sudo raspi-config
 ### 3. Install Python Dependencies
 
 ```bash
-ssh pi@192.168.50.2
+ssh pi@<PI_IP>
 cd ~/sys
 python3 -m pip install -r requirements.txt
 ```
@@ -97,7 +97,7 @@ python3 -m pip install -r requirements.txt
 ### 4. Start Pi Service
 
 ```bash
-ssh pi@192.168.50.2
+ssh pi@<PI_IP>
 cd ~/sys
 python3 pi_rover_system.py \
   --listen-ip 0.0.0.0 --listen-port 5000 \
@@ -113,15 +113,15 @@ UNDERWATER ROVER SYSTEM - STARTING
 📡 NETWORK CONFIGURATION:
    UDP Listen:   0.0.0.0:5000
    Web Dashboard: 0.0.0.0:8080
-   → IP Address: 192.168.50.2
-   → Access Dashboard: http://192.168.50.2:8080
+   → IP Address: <PI_IP>
+   → Access Dashboard: http://<PI_IP>:8080
 
 ✓ Services started. Dashboard running on port 8080
 ```
 
 ### 5. Open Dashboard (from Laptop)
 
-In your browser: **http://192.168.50.2:8080**
+In your browser: **http://<PI_IP>:8080**
 
 Expected to see:
 - "RC link: LOST" (yellow/red) until PC sender starts
@@ -159,20 +159,20 @@ Before uploading, install these libraries via **Tools → Manage Libraries** in 
 # Linux/Mac
 python3 pc_rc_sender.py \
   --serial-port /dev/ttyUSB0 \
-  --pi-ip 192.168.50.2 \
+  --pi-ip <PI_IP> \
   --pi-port 5000
 
 # Windows (COM3 example)
 python3 pc_rc_sender.py ^
   --serial-port COM3 ^
-  --pi-ip 192.168.50.2 ^
+  --pi-ip <PI_IP> ^
   --pi-port 5000
 ```
 
 Expected output:
 ```
 Reading iBUS on /dev/ttyUSB0 @ 115200
-Sending UDP to 192.168.50.2:5000 at ~50.0 Hz
+Sending UDP to <PI_IP>:5000 at ~50.0 Hz
 Move Flysky sticks to start sending data...
 
 TX: 1500 1500 1000 2000 1500 1500 1500 1500 1500 1500 1500 1500 1500 1500
@@ -220,7 +220,7 @@ Pi Top View (GPIO Header shown)
 
 - Plug RJ45 Ethernet directly between Pi and laptop Ethernet port
 - Or use network switch if multiple devices
-- Pi will be reachable at `192.168.50.2` (with default eth0 IP config)
+- Pi will be reachable at `<PI_IP>` (with default eth0 IP config)
 
 ### USB Serial (Laptop ↔ CP2102 ↔ Flysky)
 
@@ -248,7 +248,7 @@ Pi Top View (GPIO Header shown)
 
 ```bash
 python3 pi_rover_system.py --web-port 9000
-# Access at http://192.168.50.2:9000
+# Access at http://<PI_IP>:9000
 ```
 
 ### Change UDP Listen Port
@@ -285,13 +285,13 @@ python3 pi_rover_system.py --eth-interface wlan0
    ```bash
    # Run on laptop
    python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 \
-     --pi-ip 192.168.50.2 --pi-port 5000
+     --pi-ip <PI_IP> --pi-port 5000
    # Should print "TX: 1500 1500..." every 10th packet
    ```
 
 2. **Verify Pi is listening on UDP 5000:**
    ```bash
-   ssh pi@192.168.50.2
+   ssh pi@<PI_IP>
    sudo netstat -ulnp | grep 5000
    # Should show: udp  0  0 0.0.0.0:5000  0.0.0.0:*  <PID>/python3
    ```
@@ -299,8 +299,8 @@ python3 pi_rover_system.py --eth-interface wlan0
 3. **Test network connectivity:**
    ```bash
    # From laptop to Pi
-   ping 192.168.50.2
-   # Should respond: 64 bytes from 192.168.50.2: ...
+   ping <PI_IP>
+   # Should respond: 64 bytes from <PI_IP>: ...
    ```
 
 4. **Check firewall (if applicable):**
@@ -317,7 +317,7 @@ python3 pi_rover_system.py --eth-interface wlan0
    import socket
    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
    s.sendto(b'1500 1500 1000 2000 1500 1500 1500 1500 1500 1500 1500 1500 1500 1500', 
-            ('192.168.50.2', 5000))
+            ('<PI_IP>', 5000))
    "
    
    # Dashboard should briefly show "RC link: LIVE"
@@ -331,7 +331,7 @@ python3 pi_rover_system.py --eth-interface wlan0
 
 1. **Verify UART wiring physically:**
    ```bash
-   ssh pi@192.168.50.2
+   ssh pi@<PI_IP>
    
    # Test UART device exists and is writable
    python3 -c "
@@ -395,7 +395,7 @@ python3 pi_rover_system.py --eth-interface wlan0
 **Option 1: Run with sudo (quick)**
 ```bash
 sudo python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 \
-  --pi-ip 192.168.50.2 --pi-port 5000
+  --pi-ip <PI_IP> --pi-port 5000
 ```
 
 **Option 2: Add user to dialout group (permanent)**

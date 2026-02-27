@@ -6,17 +6,17 @@ Reads Flysky remote control data from CP2102 TTL converter (iBUS protocol)
 and sends it over UDP to Raspberry Pi for autonomous underwater vehicle control.
 
 Usage (auto-detect):
-  python3 pc_rc_sender.py --pi-ip 192.168.50.2
+  python3 pc_rc_sender.py --pi-ip pi04b.local
 
 Usage (explicit):
-  python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip 192.168.50.2 --pi-port 5000 --hz 50
+  python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip pi04b.local --pi-port 5000 --hz 50
 
 Data Flow:
   Flysky Remote (2.4GHz)
     → CP2102 TTL Converter (USB)
     → This script (iBUS parsing)
     → UDP frames
-    → Raspberry Pi (192.168.50.2:5000)
+    → Raspberry Pi (pi04b.local:5000)
     → Dashboard + UART → ESP32
 """
 import argparse
@@ -44,10 +44,10 @@ def auto_detect_serial() -> str:
     Returns:
         str: Device path (e.g. /dev/ttyUSB0) or empty string if none found
     """
-    candidates = sorted(
-        glob.glob("/dev/ttyUSB*") +
-        glob.glob("/dev/ttyACM*") +
-        glob.glob("/dev/ttyS[1-9]*")           # Skip ttyS0 (often the console)
+    candidates = (
+        sorted(glob.glob("/dev/ttyUSB*")) +
+        sorted(glob.glob("/dev/ttyACM*")) +
+        sorted(glob.glob("/dev/ttyS[1-9]*"))
     )
     if not candidates:
         return ""
@@ -165,7 +165,7 @@ def main():
         help="CP2102 serial device, e.g. /dev/ttyUSB0. Auto-detected if not set.",
     )
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
-    parser.add_argument("--pi-ip", required=True, help="Raspberry Pi IP address (e.g. 192.168.50.2)")
+    parser.add_argument("--pi-ip", required=True, help="Raspberry Pi IP address (e.g. pi04b.local)")
     parser.add_argument("--pi-port", type=int, default=5000, help="Raspberry Pi UDP port (default: 5000)")
     parser.add_argument("--hz", type=float, default=50.0, help="Send rate in Hz (default: 50)")
     parser.add_argument("--print-every", type=int, default=10, help="Print channel values every N sent packets (default: 10)")

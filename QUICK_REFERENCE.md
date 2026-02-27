@@ -3,14 +3,14 @@
 ## ✅ Live Services
 
 ```
-Dashboard:   http://192.168.50.2:8080
-Status API:  http://192.168.50.2:8080/api/status
-Logs API:    http://192.168.50.2:8080/api/logs
+Dashboard:   http://<PI_IP>:8080
+Status API:  http://<PI_IP>:8080/api/status
+Logs API:    http://<PI_IP>:8080/api/logs
 ```
 
 ## 📡 Connection Info
 
-**Pi IP:** `192.168.50.2`  
+**Pi IP:** `<PI_IP>`  
 **UDP RC Port:** `5000`  
 **Web Dashboard Port:** `8080`  
 **UART Port:** `/dev/serial0` (115200 baud)
@@ -21,7 +21,7 @@ Logs API:    http://192.168.50.2:8080/api/logs
 cd /home/akhil/Documents/sys
 python3 pc_rc_sender.py \
   --serial-port /dev/ttyUSB0 \
-  --pi-ip 192.168.50.2 \
+  --pi-ip <PI_IP> \
   --pi-port 5000 \
   --hz 50
 ```
@@ -48,16 +48,16 @@ python3 pc_rc_sender.py \
 
 **Dashboard not loading?**
 ```bash
-ssh pi04b@192.168.50.2 'pgrep -af pi_rover_system'
+ssh pi04b@<PI_IP> 'pgrep -af pi_rover_system'
 ```
 
 **RC Link shows LOST?**
-- Check laptop sender is running with `--pi-ip 192.168.50.2`
-- Verify network: `ping 192.168.50.2`
+- Check laptop sender is running with `--pi-ip <PI_IP>`
+- Verify network: `ping <PI_IP>`
 
 **Need to restart service?**
 ```bash
-ssh pi04b@192.168.50.2 'pkill -f pi_rover_system'
+ssh pi04b@<PI_IP> 'pkill -f pi_rover_system'
 # Wait 2 seconds, system will auto-restart or manually:
 # cd ~/sys && python3 pi_rover_system.py ...
 ```
@@ -72,11 +72,11 @@ During setup, system successfully:
 
 ## 🎯 Next Step
 
-**Open browser and go to:** `http://192.168.50.2:8080`
+**Open browser and go to:** `http://<PI_IP>:8080`
 
 Then on laptop:
 ```bash
-python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip 192.168.50.2 --pi-port 5000 --hz 50
+python3 pc_rc_sender.py --serial-port /dev/ttyUSB0 --pi-ip <PI_IP> --pi-port 5000 --hz 50
 ```
 
 Move Flysky sticks → Watch dashboard update LIVE! 🎮
