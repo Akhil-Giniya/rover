@@ -68,8 +68,7 @@ DASHBOARD_HTML = """
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rover Command Center</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <!-- Fonts: using system fonts for offline operation (no CDN needed) -->
   <style>
     :root {
       --bg1:#0a0a1a;
@@ -82,7 +81,7 @@ DASHBOARD_HTML = """
     }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{
-      font-family:'Space Grotesk',sans-serif;
+      font-family:'Segoe UI',system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif;
       background:var(--bg1);
       background-image:
         radial-gradient(ellipse 80% 50% at 15% 10%,rgba(124,58,237,.18) 0%,transparent 60%),
@@ -100,7 +99,7 @@ DASHBOARD_HTML = """
     .brand-name{font-size:16px;font-weight:700;letter-spacing:.5px;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
     .brand-sub{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
     .hdr-right{display:flex;align-items:center;gap:16px}
-    .sys-time{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--muted)}
+    .sys-time{font-family:'Consolas','Courier New',monospace;font-size:13px;color:var(--muted)}
     .sbadge{display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:1.5px;background:rgba(239,68,68,.12);color:var(--danger);border:1px solid rgba(239,68,68,.25);transition:all .4s;}
     .sbadge.live{background:rgba(16,185,129,.12);color:var(--success);border-color:rgba(16,185,129,.3);box-shadow:0 0 18px rgba(16,185,129,.2);}
     .led{width:7px;height:7px;border-radius:50%;background:var(--danger);box-shadow:0 0 8px var(--danger)}
@@ -120,7 +119,7 @@ DASHBOARD_HTML = """
     .tbar{height:100%;border-radius:3px;background:var(--gp);box-shadow:0 0 8px var(--glp);transition:width .8s cubic-bezier(.4,0,.2,1)}
     .cgrp{margin-bottom:16px}
     .clbl{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:1.5px}
-    .cval{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .cval{font-family:'Consolas','Courier New',monospace;font-size:13px;font-weight:600;background:var(--gp);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
     input[type=range]{-webkit-appearance:none;width:100%;background:transparent;cursor:pointer}
     input[type=range]::-webkit-slider-runnable-track{height:5px;border-radius:3px;background:linear-gradient(90deg,rgba(124,58,237,.5),rgba(6,182,212,.5))}
     input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;margin-top:-6.5px;box-shadow:0 0 12px var(--glp);transition:transform .15s,box-shadow .15s}
@@ -144,7 +143,7 @@ DASHBOARD_HTML = """
     .gpio-sw-row:last-child{border-bottom:none;}
     .gpio-sw-info{display:flex;flex-direction:column;gap:3px;}
     .gpio-sw-name{font-size:11px;font-weight:600;color:var(--text);letter-spacing:.5px;}
-    .gpio-sw-pin{font-size:9px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;font-family:'JetBrains Mono',monospace;}
+    .gpio-sw-pin{font-size:9px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;font-family:'Consolas','Courier New',monospace;}
     .gpio-sw-state{font-size:9px;font-weight:700;padding:2px 7px;border-radius:999px;letter-spacing:1px;transition:all .3s;}
     .gpio-sw-state.on{background:rgba(16,185,129,.15);color:var(--success);border:1px solid rgba(16,185,129,.3);}
     .gpio-sw-state.off{background:rgba(239,68,68,.1);color:var(--danger);border:1px solid rgba(239,68,68,.2);}
@@ -156,7 +155,7 @@ DASHBOARD_HTML = """
     .cam-err .cam-dot{background:var(--danger);box-shadow:0 0 8px var(--danger);animation:none}
     .btn-rc{background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.4);color:#a78bfa;padding:5px 12px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:1px;cursor:pointer;backdrop-filter:blur(8px);transition:background .2s,box-shadow .2s}
     .btn-rc:hover{background:rgba(124,58,237,.4);box-shadow:0 0 12px var(--glp)}
-    .console{font-family:'JetBrains Mono',monospace;font-size:11px;background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+    .console{font-family:'Consolas','Courier New',monospace;font-size:11px;background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
     .console::-webkit-scrollbar{width:4px}
     .console::-webkit-scrollbar-track{background:transparent}
     .console::-webkit-scrollbar-thumb{background:rgba(124,58,237,.4);border-radius:2px}
@@ -544,11 +543,56 @@ class SystemMonitor:
 
             time.sleep(10) # Log every 10 seconds
 
+class ServoFilter:
+    """Moving-average + deadband filter to stabilize servo PWM output.
+
+    - Collects the last `window_size` angle commands.
+    - Outputs the average, but only forwards to hardware when the change
+      exceeds `deadband` duty-cycle units, preventing jitter.
+    - Stops the PWM signal after `settle_time` seconds of no new commands
+      to eliminate holding-torque buzz on cheap servos.
+    """
+    def __init__(self, window_size: int = 5, deadband: float = 0.3, settle_time: float = 0.5):
+        self.window: collections.deque = collections.deque(maxlen=window_size)
+        self.deadband = deadband          # minimum duty-cycle change to actually write
+        self.settle_time = settle_time    # seconds of inactivity before stopping PWM
+        self.last_duty: Optional[float] = None
+        self.last_update_time: float = 0.0
+        self.settled = False
+
+    def feed(self, angle: int) -> Optional[float]:
+        """Feed a new angle value.  Returns the filtered duty cycle to apply,
+        or None if the change is within the deadband (no update needed)."""
+        self.window.append(angle)
+        avg_angle = sum(self.window) / len(self.window)
+        duty = 2.5 + (avg_angle / 18.0)
+        duty = max(2.5, min(12.5, duty))
+
+        if self.last_duty is not None and abs(duty - self.last_duty) < self.deadband:
+            return None  # within deadband → skip hardware write
+
+        self.last_duty = duty
+        self.last_update_time = time.monotonic()
+        self.settled = False
+        return duty
+
+    def should_stop_pwm(self) -> bool:
+        """Returns True once after the servo has been idle for settle_time."""
+        if self.settled:
+            return False
+        if self.last_update_time > 0 and (time.monotonic() - self.last_update_time) > self.settle_time:
+            self.settled = True
+            return True
+        return False
+
+
 class GpioController:
     def __init__(self, state: SharedState):
         self.state = state
         self.pwm1 = None
         self.pwm2 = None
+        self.filter1 = ServoFilter(window_size=50, deadband=0.3, settle_time=0.5)
+        self.filter2 = ServoFilter(window_size=50, deadband=0.3, settle_time=0.5)
         self.blink_thread = None
         self.blink_stop_event = threading.Event()
 
@@ -569,10 +613,9 @@ class GpioController:
                 GPIO.setup(PIN_RELAY_MOMENTARY, GPIO.OUT)
                 GPIO.output(PIN_RELAY_MOMENTARY, GPIO.LOW)
 
-                # Setup GPIO Switch Pins
+                # Setup GPIO Switch Pins via pinctrl (RPi.GPIO doesn't reliably control these pins)
                 for pin in SWITCH_PINS:
-                    GPIO.setup(pin, GPIO.OUT)
-                    GPIO.output(pin, GPIO.LOW)
+                    subprocess.run(["pinctrl", "set", str(pin), "op", "dl"], check=False)
 
                 state.add_log("GPIO", "Initialized successfully (switches on pins 17,27,22)")
             except Exception as e:
@@ -592,22 +635,24 @@ class GpioController:
         pin = SWITCH_PINS[idx]
         with self.state.lock:
             self.state.switch_states[idx] = active
-        if GPIO_AVAILABLE:
-            try:
-                GPIO.output(pin, GPIO.HIGH if active else GPIO.LOW)
-            except Exception as e:
-                self.state.add_log("GPIO", f"Switch {switch_id} error: {e}")
+        # Use pinctrl instead of RPi.GPIO (more reliable on Pi 4B)
+        level = "dh" if active else "dl"
+        try:
+            subprocess.run(["pinctrl", "set", str(pin), "op", level], check=True)
+        except Exception as e:
+            self.state.add_log("GPIO", f"Switch {switch_id} error: {e}")
         self.state.add_log("GPIO", f"Switch {switch_id} (GPIO {pin}) → {'ON' if active else 'OFF'}")
 
     def set_servo(self, servo_id: int, angle: int):
-        # Map 0-180 degrees to 2.5-12.5 duty cycle
-        duty = 2.5 + (angle / 18.0)
-        duty = max(2.5, min(12.5, duty))
-
-        if self.pwm1 and servo_id == 1:
-            self.pwm1.ChangeDutyCycle(duty)
-        elif self.pwm2 and servo_id == 2:
-            self.pwm2.ChangeDutyCycle(duty)
+        # Run angle through the sampling filter (moving average + deadband)
+        if servo_id == 1:
+            duty = self.filter1.feed(angle)
+            if duty is not None and self.pwm1:
+                self.pwm1.ChangeDutyCycle(duty)
+        elif servo_id == 2:
+            duty = self.filter2.feed(angle)
+            if duty is not None and self.pwm2:
+                self.pwm2.ChangeDutyCycle(duty)
 
     def set_momentary(self, active: bool):
         with self.state.lock:
@@ -657,6 +702,12 @@ class GpioController:
 
             with self.state.lock:
                 self.state.relay_state = target_high
+
+            # Servo settle check — stop PWM signal to prevent holding buzz
+            if self.pwm1 and self.filter1.should_stop_pwm():
+                self.pwm1.ChangeDutyCycle(0)
+            if self.pwm2 and self.filter2.should_stop_pwm():
+                self.pwm2.ChangeDutyCycle(0)
 
             time.sleep(0.05) # 20Hz update rate
 
@@ -776,7 +827,7 @@ def create_app(state: SharedState, gpio: GpioController, args):
     def dashboard():
         # Dynamically determine the host for the video feed based on how the dashboard was accessed
         host = request.host.split(':')[0]
-        video_url = f"http://{host}:8090/video_feed"
+        video_url = f"http://{host}:8081/video_feed"
         return render_template_string(DASHBOARD_HTML, video_url=video_url)
 
 
