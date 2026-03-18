@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# =============================================================================
+# launch.sh  –  One-Click Rover Launcher (PC → SSH → Pi)
+#
+# RUN THIS ON YOUR PC. It will:
+#   1. Sync project files to Raspberry Pi
+#   2. Start pi_rover_system.py on the Pi (over SSH)
+#   3. Start pc_rc_sender.py on this PC (reads Flysky iBUS, sends UDP)
+#   4. Print the dashboard URL
+#   5. Ctrl+C stops everything cleanly
+#
+# USAGE:
+#   chmod +x launch.sh
+#   ./launch.sh
+#   ./launch.sh --foreground   # keep log stream attached
+#
+# REQUIREMENTS (PC):
+#   sudo apt install sshpass rsync   (or: pip3 install pyserial)
+# =============================================================================
+set -euo pipefail
+
+# ── Config ────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOTENV_FILE="${SCRIPT_DIR}/.env"
+if [[ -f "${DOTENV_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${DOTENV_FILE}"
+fi
+
+PI_USER="${PI_USER:-pi04b}"
+PI_HOST="${PI_HOST:-pi04b.local}"
+PI_PASS="${PI_PASS:-123456}"
+PI_PORT_UDP="${PI_PORT_UDP:-5000}"
+PI_PORT_WEB="${PI_PORT_WEB:-8080}"
+PI_PORT_VIDEO="${PI_PORT_VIDEO:-8090}"
+PI_ROVER_DIR="${PI_ROVER_DIR:-/home/${PI_USER}/rover}"
+PI_VENV_DIR="${PI_ROVER_DIR}/.venv"
+UART_PORT="${UART_PORT:-/dev/serial0}"
+BAUD="${BAUD:-115200}"
+EFFECTIVE_UART_PORT="${UART_PORT}"
+PI_PYTHON_BIN="python3"
+RUN_MODE="background"
+
+usage() {
+  echo "Usage: ./launch.sh [options]"
+  echo "Options:"
+  echo "  --foreground        Keep log stream attached"
+  echo "  --background        Run in background (default)"
+  echo "  --host <ip>         Pi IP address or hostname"
+  echo "  --user <user>       Pi SSH username"
+  echo "  --pass <pass>       Pi SSH password"
+  echo "  -h, --help          Show this help"
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --foreground) RUN_MODE="foreground"; shift ;;
+    --background) RUN_MODE="background"; shift ;;
+    --host) PI_HOST="$2"; shift 2 ;;
+    --user) PI_USER="$2"; shift 2 ;;
+    --pass) PI_PASS="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *)
+      echo -e "\033[0;31m[FAIL]\033[0m Unknown argument: $1"
+      usage
+      ;;
+  esac
+done
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
+ok()    { echo -e "${GREEN}[ OK ]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+step()  { echo -e "\n${BOLD}▶ $*${NC}"; }
+
+# ── SSH / SCP helpers (non-interactive with sshpass) ─────────────────────────
+SSH_OPTS="-o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o PasswordAuthentication=yes -o LogLevel=ERROR -o ControlMaster=no -o ConnectTimeout=6 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+SSH="sshpass -p ${PI_PASS} ssh ${SSH_OPTS}"
+SCP="sshpass -p ${PI_PASS} scp ${SSH_OPTS}"
+
+RETRY_DELAY=2
+
+run_with_retries() {
+  local attempts="$1"
+  shift
+  local n=1
+  until "$@"; do
+    if (( n >= attempts )); then
+      return 1
+    fi
+    sleep "${RETRY_DELAY}"
+    ((n++))
+  done
+}
+
+find_flysky_port() {
+  local preferred=()
+  local fallback=()
+
+  if [[ -d /dev/serial/by-id ]]; then
+    while IFS= read -r dev; do
+      local base
+      base="$(basename "$dev" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$base" == *cp210* || "$base" == *silicon_labs* || "$base" == *ch340* || "$base" == *ftdi* || "$base" == *usb* ]]; then
+        preferred+=("$dev")
+      else
+        fallback+=("$dev")
+      fi
+    done < <(find /dev/serial/by-id -maxdepth 1 -type l 2>/dev/null | sort)
+  fi
+
+  for pat in /dev/ttyUSB* /dev/ttyACM*; do
+    if [[ -e "$pat" ]]; then
+      preferred+=("$pat")
+    fi
+  done
+
+  if [[ ${#preferred[@]} -gt 0 ]]; then
+    echo "${preferred[0]}"
+    return
+  fi
+
+  if [[ ${#fallback[@]} -gt 0 ]]; then
+    echo "${fallback[0]}"
+    return
+  fi
+
+  if [[ -e /dev/ttyUSB0 ]]; then
+    echo "/dev/ttyUSB0"
+    return
+  fi
+
+  if [[ -e /dev/ttyACM0 ]]; then
+    echo "/dev/ttyACM0"
+    return
+  fi
+
+  if [[ ${#preferred[@]} -eq 0 && ${#fallback[@]} -eq 0 ]]; then
+    echo ""
+    return
+  fi
+}
+
+pi_run() {
+  # Run a command on the Pi and return its output
+  $SSH ${PI_USER}@${PI_HOST} "$@" </dev/null
+}
+
+pi_run_retry() {
+  run_with_retries 4 pi_run "$@"
+}
+
+pi_scp() {
+  sshpass -p "${PI_PASS}" scp ${SSH_OPTS} "$@"
+}
+
+pi_scp_retry() {
+  run_with_retries 4 pi_scp "$@"
+}
+
+pi_http_check() {
+  local port="$1"
+  pi_run "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:${port}/\", timeout=2).read(1)' >/dev/null 2>&1"
+}
+
+detect_pi_uart_port() {
+  local requested="$1"
+
+  if pi_run "test -e ${requested}" >/dev/null 2>&1; then
+    echo "${requested}"
+    return 0
+  fi
+
+  local fallback
+  fallback="$(pi_run "for d in /dev/serial0 /dev/ttyAMA0 /dev/ttyS0; do [ -e \"\$d\" ] && { echo \"\$d\"; break; }; done")"
+
+  if [[ -n "${fallback}" ]]; then
+    echo "${fallback}"
+    return 0
+  fi
+
+  return 1
+}
+
+# ════════════════════════════════════════════════════════════════════════════
+# BANNER
+# ════════════════════════════════════════════════════════════════════════════
+clear
+echo -e "${BOLD}"
+echo "  ╔══════════════════════════════════════════════════════╗"
+echo "  ║       UNDERWATER ROVER — ONE-CLICK LAUNCHER          ║"
+echo "  ╚══════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+info "Pi target  : ${PI_USER}@${PI_HOST}"
+info "UDP port   : ${PI_PORT_UDP}"
+info "Dashboard  : http://${PI_HOST}:${PI_PORT_WEB}"
+info "Camera     : http://${PI_HOST}:${PI_PORT_VIDEO}"
+echo ""
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 1 — Check prerequisites on this PC
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 1 — Checking PC prerequisites"
+
+if ! command -v sudo &>/dev/null; then
+  fail "sudo is required for first-run dependency setup"
+fi
+
+if ! command -v apt-get &>/dev/null; then
+  fail "apt-get not found. Install sshpass, rsync, and python3-serial manually for this distro"
+fi
+
+if ! command -v sshpass &>/dev/null; then
+  warn "sshpass not found — installing..."
+  sudo apt-get update -qq || true
+  sudo apt-get install -y sshpass -qq || fail "Cannot install sshpass. Run: sudo apt install sshpass"
+fi
+ok "sshpass found"
+
+if ! command -v rsync &>/dev/null; then
+  warn "rsync not found — installing..."
+  sudo apt-get update -qq || true
+  sudo apt-get install -y rsync -qq || warn "rsync unavailable, falling back to scp"
+fi
+
+python3 -c "import serial" 2>/dev/null || {
+  warn "pyserial not found on PC — installing..."
+  python3 -m pip --version >/dev/null 2>&1 || sudo apt-get install -y python3-pip -qq
+  python3 -m pip install --user pyserial -q || python3 -m pip install pyserial -q
+}
+ok "pyserial on PC"
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 2 — Verify Pi is reachable
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 2 — Connecting to Pi at ${PI_HOST}"
+
+if ! run_with_retries 3 ping -c1 -W2 "${PI_HOST}" &>/dev/null; then
+  warn "Cannot ping Pi at ${PI_HOST}."
+  # Try fallback to common static IP if default failed and not overridden by env/cli
+  if [[ "${PI_HOST}" == "pi04b.local" ]]; then
+    FALLBACK_IP="192.168.50.2"
+    info "Trying fallback IP: ${FALLBACK_IP}..."
+    if ping -c1 -W2 "${FALLBACK_IP}" &>/dev/null; then
+      PI_HOST="${FALLBACK_IP}"
+    fi
+  fi
+  
+  if ! ping -c1 -W2 "${PI_HOST}" &>/dev/null; then
+    fail "Cannot reach Pi at ${PI_HOST}. Check ethernet cable and IP."
+  fi
+fi
+ok "Pi is reachable at ${PI_HOST}"
+
+# Save session config to .env if it changed or doesn't exist
+if [[ ! -f "${DOTENV_FILE}" || "$(grep "PI_HOST=" "${DOTENV_FILE}" | cut -d'=' -f2)" != "${PI_HOST}" ]]; then
+  info "Saving configuration to .env"
+  {
+    echo "PI_USER=\"${PI_USER}\""
+    echo "PI_HOST=\"${PI_HOST}\""
+    echo "PI_PASS=\"${PI_PASS}\""
+    echo "PI_PORT_UDP=${PI_PORT_UDP}"
+    echo "PI_PORT_WEB=${PI_PORT_WEB}"
+    echo "PI_PORT_VIDEO=${PI_PORT_VIDEO}"
+  } > "${DOTENV_FILE}"
+fi
+
+PI_PYTHON=$(pi_run_retry "python3 --version 2>&1") || fail "SSH to Pi failed"
+ok "Pi Python: ${PI_PYTHON}"
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 3 — Sync files to Pi
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 3 — Syncing files to Pi → ${PI_ROVER_DIR}/"
+
+pi_run_retry "mkdir -p ${PI_ROVER_DIR}"
+
+# Files that need to run on the Pi
+FILES_TO_SYNC=(
+  "pi_rover_system.py"
+  "pi_web_video_stream.py"
+  "hardware_check.py"
+  "requirements.txt"
+)
+
+for f in "${FILES_TO_SYNC[@]}"; do
+  if [[ -f "${SCRIPT_DIR}/${f}" ]]; then
+    pi_scp_retry "${SCRIPT_DIR}/${f}" "${PI_USER}@${PI_HOST}:${PI_ROVER_DIR}/${f}" \
+      && ok "  Synced: ${f}" \
+      || warn "  Could not sync: ${f}"
+  else
+    warn "  Not found locally: ${f} (skipping)"
+  fi
+done
+
+# Install Pi-side Python dependencies
+step "Step 3b — Installing Pi dependencies"
+deps_ready=0
+for attempt in 1 2 3; do
+  info "Pi dependency setup attempt ${attempt}/3"
+  if $SSH ${PI_USER}@${PI_HOST} "bash -s -- ${PI_ROVER_DIR} ${PI_VENV_DIR}" <<'EOS'
+set -e
+
+PI_ROVER_DIR="$1"
+PI_VENV_DIR="$2"
+REQ_FILE="${PI_ROVER_DIR}/requirements.txt"
+MARKER="${PI_VENV_DIR}/.deps_hash"
+TMP_REQ="/tmp/rover_requirements_no_cv.txt"
+
+command -v python3 >/dev/null
+
+if ! python3 -m venv --help >/dev/null 2>&1; then
+  echo "[deps] Installing python3-venv"
+  sudo apt-get update -y || true
+  sudo apt-get install -y python3-venv
+fi
+
+if [ ! -d "${PI_VENV_DIR}" ]; then
+  echo "[deps] Creating virtualenv ${PI_VENV_DIR}"
+  python3 -m venv --system-site-packages "${PI_VENV_DIR}"
+fi
+
+if [ ! -x "${PI_VENV_DIR}/bin/python" ]; then
+  echo "[deps] Rebuilding broken virtualenv"
+  rm -rf "${PI_VENV_DIR}"
+  python3 -m venv --system-site-packages "${PI_VENV_DIR}"
+fi
+
+REQ_HASH="no_requirements"
+if [ -f "${REQ_FILE}" ]; then
+  REQ_HASH="$(sha256sum "${REQ_FILE}" | awk '{print $1}')"
+fi
+
+if [ -f "${MARKER}" ] && [ "$(cat "${MARKER}")" = "${REQ_HASH}" ]; then
+  echo "[deps] Requirements unchanged; skipping install"
+  exit 0
+fi
+
+echo "[deps] Updating pip tooling"
+"${PI_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check -q --upgrade pip setuptools wheel
+
+if ! "${PI_VENV_DIR}/bin/python" -c "import cv2" >/dev/null 2>&1; then
+  echo "[deps] Installing OpenCV via apt (preferred on Pi)"
+  sudo apt-get update -y || true
+  sudo apt-get install -y python3-opencv || true
+fi
+
+if [ -f "${REQ_FILE}" ]; then
+  grep -vi '^opencv-python-headless' "${REQ_FILE}" > "${TMP_REQ}" || true
+fi
+
+if [ -s "${TMP_REQ}" ]; then
+  echo "[deps] Installing Python deps (without OpenCV)"
+  "${PI_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check -r "${TMP_REQ}"
+else
+  echo "[deps] Installing base deps"
+  "${PI_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check flask pyserial
+fi
+
+if ! "${PI_VENV_DIR}/bin/python" -c "import cv2" >/dev/null 2>&1; then
+  echo "[deps] OpenCV still missing; trying pip wheel (timeout 20m)"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 1200 "${PI_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check opencv-python-headless || true
+  else
+    "${PI_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check opencv-python-headless || true
+  fi
+fi
+
+"${PI_VENV_DIR}/bin/python" -c "import flask,serial" >/dev/null 2>&1
+"${PI_VENV_DIR}/bin/python" -c "import cv2" >/dev/null 2>&1 || echo "[deps] WARN: cv2 not importable; camera may fail"
+
+echo "${REQ_HASH}" > "${MARKER}"
+EOS
+  then
+    deps_ready=1
+    break
+  fi
+  sleep "${RETRY_DELAY}"
+done
+
+[[ "${deps_ready}" -eq 1 ]] || fail "Pi dependency setup failed"
+
+PI_PYTHON_BIN="${PI_VENV_DIR}/bin/python"
+ok "Pi virtualenv ready: ${PI_VENV_DIR}"
+
+if ! EFFECTIVE_UART_PORT="$(detect_pi_uart_port "${UART_PORT}")"; then
+  fail "No UART device found on Pi (/dev/serial0, /dev/ttyAMA0, /dev/ttyS0). Enable UART in raspi-config first."
+fi
+
+UART_REAL="$(pi_run_retry "readlink -f ${EFFECTIVE_UART_PORT} 2>/dev/null || echo ${EFFECTIVE_UART_PORT}")"
+info "Pi UART selected: ${EFFECTIVE_UART_PORT} (maps to ${UART_REAL})"
+
+# Ensure user can access serial device (GPIO UART)
+pi_run_retry "sudo usermod -a -G dialout ${PI_USER} 2>/dev/null || true"
+pi_run_retry "sudo chmod 660 /dev/serial0 2>/dev/null || true"
+pi_run_retry "sudo chmod 660 /dev/ttyAMA0 2>/dev/null || true"
+pi_run_retry "sudo chmod 660 /dev/ttyS0 2>/dev/null || true"
+
+SERIAL_GETTY_STATE="$(pi_run_retry "systemctl is-active serial-getty@ttyAMA0.service 2>/dev/null || true")"
+if [[ "${SERIAL_GETTY_STATE}" == "active" ]]; then
+  warn "serial-getty@ttyAMA0 is active and can steal GPIO UART."
+  warn "Disable once on Pi: sudo systemctl disable --now serial-getty@ttyAMA0.service"
+fi
+
+ok "Pi dependencies and UART permissions ready"
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Stop any previous instance on Pi
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 4 — Stopping any previous rover process on Pi"
+pi_run_retry "pkill -f pi_rover_system.py" 2>/dev/null || true
+pi_run_retry "pkill -f pi_web_video_stream.py" 2>/dev/null || true
+pi_run_retry "sleep 1" || true
+ok "Old processes cleared"
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 5 — Start pi_rover_system.py on Pi (background, log to file)
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 5 — Starting pi_rover_system.py on Pi"
+
+# Check UART availability on Pi
+UART_AVAILABLE=$(pi_run_retry "test -e ${EFFECTIVE_UART_PORT} && echo yes || echo no")
+if [[ "$UART_AVAILABLE" == "yes" ]]; then
+  ok "UART ${EFFECTIVE_UART_PORT} available on Pi"
+else
+  warn "UART ${EFFECTIVE_UART_PORT} not found on Pi — ESP32 link will be inactive"
+fi
+
+PI_CMD="cd ${PI_ROVER_DIR} && nohup ${PI_PYTHON_BIN} pi_rover_system.py --listen-ip 0.0.0.0 --listen-port ${PI_PORT_UDP} --uart-port ${EFFECTIVE_UART_PORT} --baud ${BAUD} --web-port ${PI_PORT_WEB} --eth-interface eth0 > /tmp/rover.log 2>&1 </dev/null & echo \$! > /tmp/rover.pid"
+
+pi_run_retry "${PI_CMD}" >/dev/null 2>&1 || true
+PI_PID="$(pi_run_retry "cat /tmp/rover.pid" | tr -dc '0-9')"
+[[ -n "${PI_PID}" ]] || fail "Pi rover did not return a PID. Check: ssh ${PI_USER}@${PI_HOST} 'tail -50 /tmp/rover.log'"
+
+if ! pi_run_retry "kill -0 ${PI_PID} 2>/dev/null"; then
+  fail "Pi rover process failed to start. Check: ssh ${PI_USER}@${PI_HOST} 'tail -80 /tmp/rover.log'"
+fi
+
+ok "Pi rover system started"
+info "Pi PID: ${PI_PID}"
+info "Pi logs: ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/rover.log'"
+
+# Wait for Flask to come up
+echo -n "  Waiting for dashboard to start"
+for i in {1..15}; do
+  sleep 1
+  echo -n "."
+  if pi_http_check "${PI_PORT_WEB}"; then
+    echo ""
+    ok "Dashboard is UP → http://${PI_HOST}:${PI_PORT_WEB}"
+    break
+  fi
+  if [[ $i -eq 15 ]]; then
+    echo ""
+    warn "Dashboard not responding yet — check logs: ssh ${PI_USER}@${PI_HOST} 'tail -30 /tmp/rover.log'"
+  fi
+done
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 5b — Start pi_web_video_stream.py on Pi
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 5b — Starting camera video stream on Pi"
+
+# Kill any old instance first
+pi_run "sudo pkill -9 -f pi_web_video_stream.py 2>/dev/null; true"
+pi_run "sudo pkill -9 -f 'libcamera|rpicam|picamera|mjpg|motion|ffmpeg' 2>/dev/null; true"
+# Explicitly clear any v4l2 locks
+pi_run "sudo modprobe -r bcm2835_v4l2 2>/dev/null; sudo modprobe bcm2835_v4l2 2>/dev/null" || true
+pi_run "sleep 2" || true
+
+VIDEO_PID=""
+for cam_try in 1 2 3; do
+  VIDEO_CMD="cd ${PI_ROVER_DIR} && nohup ${PI_PYTHON_BIN} pi_web_video_stream.py --port ${PI_PORT_VIDEO} > /tmp/video_stream.log 2>&1 </dev/null & echo \$! > /tmp/video.pid"
+  pi_run_retry "${VIDEO_CMD}" >/dev/null 2>&1 || true
+  VIDEO_PID="$(pi_run_retry "cat /tmp/video.pid" | tr -dc '0-9')"
+  sleep 1
+  if [[ -n "${VIDEO_PID}" ]] && pi_run_retry "kill -0 ${VIDEO_PID} 2>/dev/null"; then
+    break
+  fi
+  warn "Camera start attempt ${cam_try}/3 failed; retrying..."
+  pi_run_retry "pkill -f pi_web_video_stream.py 2>/dev/null; true"
+  pi_run_retry "pkill -f 'libcamera|rpicam|picamera|mjpg|motion|ffmpeg' 2>/dev/null; true"
+  pi_run_retry "sleep 1" || true
+  VIDEO_PID=""
+done
+
+if [[ -n "${VIDEO_PID}" ]]; then
+  if ! pi_run_retry "kill -0 ${VIDEO_PID} 2>/dev/null"; then
+    warn "Camera process exited immediately — check: ssh ${PI_USER}@${PI_HOST} 'tail -40 /tmp/video_stream.log'"
+    VIDEO_PID=""
+  fi
+
+  echo -n "  Waiting for camera stream to start"
+  for i in {1..20}; do
+    sleep 1
+    echo -n "."
+    if pi_http_check "${PI_PORT_VIDEO}"; then
+      echo ""
+      ok "Camera stream is UP → http://${PI_HOST}:${PI_PORT_VIDEO}"
+      info "Stream logs: ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/video_stream.log'"
+      break
+    fi
+    if [[ $i -eq 20 ]]; then
+      echo ""
+      warn "Camera stream not responding — attempting deep reset..."
+      pi_run "sudo pkill -9 -f 'libcamera|rpicam|picamera|mjpg|motion|ffmpeg'; sudo modprobe -r bcm2835_v4l2 2>/dev/null; sudo modprobe bcm2835_v4l2 2>/dev/null" || true
+      VIDEO_PID=""
+    fi
+  done
+else
+  warn "Camera stream did not return a PID — continuing without video."
+fi
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 6 — Starting PC RC sender (Flysky → UDP → Pi)
+# ════════════════════════════════════════════════════════════════════════════
+step "Step 6 — Starting PC RC sender (Flysky → UDP → Pi)"
+
+# Kill any existing PC sender first
+pkill -f pc_rc_sender.py 2>/dev/null || true
+
+# Auto-detect serial port
+SERIAL_PORT="$(find_flysky_port)"
+
+# LOG FILE for PC sender
+PC_RC_LOG="${SCRIPT_DIR}/pc_rc_sender.log"
+
+RC_PID=""
+if [[ -z "$SERIAL_PORT" ]]; then
+  warn "No Flysky adapter detected. Trying sender auto-detect mode..."
+  nohup python3 "${SCRIPT_DIR}/pc_rc_sender.py" \
+    --pi-ip "${PI_HOST}" \
+    --pi-port "${PI_PORT_UDP}" \
+    --hz 50 \
+    --print-every 20 \
+    > "${PC_RC_LOG}" 2>&1 &
+  RC_PID=$!
+else
+  ok "Flysky adapter: ${SERIAL_PORT}"
+
+  if [[ ! -r "${SERIAL_PORT}" || ! -w "${SERIAL_PORT}" ]]; then
+    warn "No read/write permission on ${SERIAL_PORT}."
+    warn "Run once: sudo usermod -a -G dialout ${USER} && newgrp dialout"
+  fi
+
+  nohup python3 "${SCRIPT_DIR}/pc_rc_sender.py" \
+    --serial-port "${SERIAL_PORT}" \
+    --pi-ip "${PI_HOST}" \
+    --pi-port "${PI_PORT_UDP}" \
+    --hz 50 \
+    --print-every 20 \
+    > "${PC_RC_LOG}" 2>&1 &
+  RC_PID=$!
+fi
+
+if [[ -n "${RC_PID}" ]]; then
+  for _ in {1..5}; do
+    sleep 1
+    if kill -0 "${RC_PID}" 2>/dev/null; then
+      break
+    fi
+  done
+  if kill -0 "${RC_PID}" 2>/dev/null; then
+    ok "RC sender started (PID: ${RC_PID})"
+    info "RC logs: tail -f ${PC_RC_LOG}"
+  else
+    warn "RC sender exited early. Last logs:"
+    tail -n 20 "${PC_RC_LOG}" 2>/dev/null || true
+  fi
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# STEP 7 — Open dashboard in browser
+# ════════════════════════════════════════════════════════════════════════════
+DASH_URL="http://${PI_HOST}:${PI_PORT_WEB}"
+if command -v xdg-open &>/dev/null; then
+  xdg-open "${DASH_URL}" &>/dev/null &
+elif command -v firefox &>/dev/null; then
+  firefox "${DASH_URL}" &>/dev/null &
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+# DONE
+# ════════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}  ╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}  ║  ✓  ALL SYSTEMS GO                                  ║${NC}"
+echo -e "${BOLD}  ╠══════════════════════════════════════════════════════╣${NC}"
+echo -e "  ║  Dashboard : ${CYAN}${DASH_URL}${NC}"
+echo -e "  ║  Camera    : ${CYAN}http://${PI_HOST}:${PI_PORT_VIDEO}${NC}"
+echo -e "  ║  Pi logs   : ${CYAN}ssh ${PI_USER}@${PI_HOST} 'tail -f /tmp/rover.log'${NC}"
+echo -e "  ║  Ctrl+C    : stops RC sender + Pi rover + camera"
+echo -e "${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+if [[ "${RUN_MODE}" == "foreground" ]]; then
+  info "Streaming Pi rover logs (Ctrl+C to stop everything):"
+  echo "────────────────────────────────────────────────────────"
+
+  cleanup() {
+    echo ""
+    step "Shutting down..."
+    [[ -n "${RC_PID}" ]] && kill "${RC_PID}" 2>/dev/null && ok "RC sender stopped"
+    pi_run "pkill -f pi_web_video_stream.py 2>/dev/null || true"
+    ok "Camera stream stopped"
+    pi_run "pkill -f pi_rover_system.py 2>/dev/null || true"
+    ok "Pi rover system stopped"
+    ok "Bye!"
+  }
+  trap cleanup EXIT INT TERM
+
+  $SSH -tt "${PI_USER}@${PI_HOST}" "tail -F /tmp/rover.log" 2>/dev/null || true
+else
+  ok "Launcher detached. Services keep running in background."
+  info "Dashboard: ${DASH_URL}"
+  info "Stop later: ssh ${PI_USER}@${PI_HOST} 'pkill -f pi_rover_system.py; pkill -f pi_web_video_stream.py' && pkill -f pc_rc_sender.py"
+fi
