@@ -23,19 +23,12 @@ sudo bash ethernet_only_setup.sh
 sudo reboot
 ```
 
-## Launch Everything
 
-### Option A: One-click launch (from PC)
-```bash
-cd Documents/rover
-./launch.sh
-```
-
-### Option B: Manual launch
+### Option A: Manual launch
 
 **Terminal 1 — RC Sender (PC)**
 ```bash
-cd Documents/rover
+cd rover
 python3 pc_rc_sender.py \
   --serial-port /dev/ttyUSB0 \
   --pi-ip 192.168.50.2 \

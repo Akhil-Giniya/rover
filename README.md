@@ -32,7 +32,7 @@ Professional-grade Raspberry Pi native control system for underwater rovers. Fea
 │                                                              │
 │  ← UART Response (logs, status) ←                           │
 │                                                              │
-│  http://<PI_IP>:8080 ← Access Web Dashboard           │
+│  http://192.168.50.2:8080 ← Access Web Dashboard           │
 └──────────────────────────────────────────────────────────────┘
                                     ↓
                          GPIO14 (TX) / GPIO15 (RX)
